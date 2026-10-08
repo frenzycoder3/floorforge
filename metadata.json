@@ -1,0 +1,6 @@
+{
+  "name": "FloorForge — 2D-to-3D Architectural Layout Engine",
+  "description": "AI-powered architectural spatial workbench (HNX26EPS06) that converts 2D floor-plan drawings into calibrated 3D room models with GLB export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
