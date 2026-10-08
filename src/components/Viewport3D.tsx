@@ -4,9 +4,10 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import {
   FloorPlanPipelineResult,
+  FurnitureMesh3D,
   PipelineConfig,
 } from '../types/floorforge';
-import { RotateCcw, Box, Layers, Compass, Download } from 'lucide-react';
+import { RotateCcw, Layers, Compass, Download, ShieldCheck } from 'lucide-react';
 
 export interface Viewport3DHandle {
   exportGLB: () => void;
@@ -21,6 +22,205 @@ interface Viewport3DProps {
   onChangeMaterialTheme: (theme: PipelineConfig['material_theme']) => void;
 }
 
+/**
+ * Builds detailed multi-part 3D architectural meshes for beds, bathtubs, toilets,
+ * vanity sinks, sofas, kitchen counters, dining tables, wardrobes, and desks.
+ */
+function buildFurniture3DObject(
+  item: FurnitureMesh3D,
+  epistemicMode: boolean
+): THREE.Group {
+  const group = new THREE.Group();
+  group.position.set(item.center_m.x, 0.05, item.center_m.y);
+  group.rotation.y = -item.rotation_rad;
+  group.name = `Furniture_${item.kind}_${item.id}`;
+
+  const w = item.width_m;
+  const d = item.depth_m;
+  const h = item.height_m;
+
+  const isGenerated = item.provenance === 'generated_completion';
+
+  const makeMat = (hex: string, roughness = 0.6, metalness = 0.08) => {
+    if (epistemicMode) {
+      return new THREE.MeshStandardMaterial({
+        color: isGenerated ? '#F59E0B' : '#10B981',
+        roughness: 0.4,
+        metalness: 0.15,
+        transparent: isGenerated,
+        opacity: isGenerated ? 0.72 : 0.95,
+      });
+    }
+    return new THREE.MeshStandardMaterial({ color: hex, roughness, metalness });
+  };
+
+  if (item.kind === 'bed') {
+    // 1. Wooden platform frame
+    const frameGeo = new THREE.BoxGeometry(w, 0.22, d);
+    const frameMesh = new THREE.Mesh(frameGeo, makeMat('#78350F', 0.7));
+    frameMesh.position.y = 0.11;
+    frameMesh.castShadow = true;
+    group.add(frameMesh);
+
+    // 2. Plush white mattress
+    const matGeo = new THREE.BoxGeometry(w * 0.94, 0.24, d * 0.92);
+    const matMesh = new THREE.Mesh(matGeo, makeMat('#F8FAFC', 0.85));
+    matMesh.position.y = 0.34;
+    matMesh.castShadow = true;
+    group.add(matMesh);
+
+    // 3. Blanket / duvet cover on lower 65% of bed
+    const duvetGeo = new THREE.BoxGeometry(w * 0.95, 0.25, d * 0.6);
+    const duvetMesh = new THREE.Mesh(duvetGeo, makeMat('#3B82F6', 0.8));
+    duvetMesh.position.set(0, 0.35, d * 0.15);
+    group.add(duvetMesh);
+
+    // 4. Two pillows near headboard
+    const pillowGeo = new THREE.BoxGeometry(w * 0.36, 0.1, d * 0.18);
+    const p1 = new THREE.Mesh(pillowGeo, makeMat('#FFFFFF', 0.8));
+    p1.position.set(-w * 0.22, 0.5, -d * 0.32);
+    const p2 = new THREE.Mesh(pillowGeo, makeMat('#FFFFFF', 0.8));
+    p2.position.set(w * 0.22, 0.5, -d * 0.32);
+    group.add(p1, p2);
+
+    // 5. Headboard
+    const hbGeo = new THREE.BoxGeometry(w, 0.95, 0.1);
+    const hbMesh = new THREE.Mesh(hbGeo, makeMat('#451A03', 0.65));
+    hbMesh.position.set(0, 0.475, -d / 2 + 0.05);
+    hbMesh.castShadow = true;
+    group.add(hbMesh);
+  } else if (item.kind === 'bathtub') {
+    // Outer porcelain tub shell
+    const tubGeo = new THREE.BoxGeometry(w, 0.58, d);
+    const tubMesh = new THREE.Mesh(tubGeo, makeMat('#F8FAFC', 0.2, 0.1));
+    tubMesh.position.y = 0.29;
+    tubMesh.castShadow = true;
+    group.add(tubMesh);
+
+    // Inner aqua water surface
+    const waterGeo = new THREE.BoxGeometry(w * 0.84, 0.04, d * 0.78);
+    const waterMesh = new THREE.Mesh(waterGeo, makeMat('#38BDF8', 0.15, 0.2));
+    waterMesh.position.y = 0.57;
+    group.add(waterMesh);
+  } else if (item.kind === 'toilet') {
+    // Bowl
+    const bowlGeo = new THREE.CylinderGeometry(w * 0.42, w * 0.34, 0.42, 16);
+    const bowlMesh = new THREE.Mesh(bowlGeo, makeMat('#F8FAFC', 0.2));
+    bowlMesh.position.set(0, 0.21, d * 0.12);
+    bowlMesh.castShadow = true;
+    group.add(bowlMesh);
+
+    // Cistern tank
+    const tankGeo = new THREE.BoxGeometry(w * 0.9, 0.44, d * 0.34);
+    const tankMesh = new THREE.Mesh(tankGeo, makeMat('#F1F5F9', 0.2));
+    tankMesh.position.set(0, 0.56, -d * 0.3);
+    tankMesh.castShadow = true;
+    group.add(tankMesh);
+  } else if (item.kind === 'sink_vanity') {
+    // Vanity cabinet
+    const cabGeo = new THREE.BoxGeometry(w, 0.82, d);
+    const cabMesh = new THREE.Mesh(cabGeo, makeMat('#475569', 0.6));
+    cabMesh.position.y = 0.41;
+    cabMesh.castShadow = true;
+    group.add(cabMesh);
+
+    // White porcelain countertop
+    const topGeo = new THREE.BoxGeometry(w * 1.02, 0.06, d * 1.02);
+    const topMesh = new THREE.Mesh(topGeo, makeMat('#F8FAFC', 0.25));
+    topMesh.position.y = 0.85;
+    group.add(topMesh);
+
+    // Basin
+    const basinGeo = new THREE.CylinderGeometry(Math.min(w, d) * 0.3, Math.min(w, d) * 0.25, 0.08, 16);
+    const basinMesh = new THREE.Mesh(basinGeo, makeMat('#38BDF8', 0.2));
+    basinMesh.position.y = 0.86;
+    group.add(basinMesh);
+  } else if (item.kind === 'sofa') {
+    // Seat base
+    const seatGeo = new THREE.BoxGeometry(w, 0.4, d);
+    const seatMesh = new THREE.Mesh(seatGeo, makeMat('#475569', 0.85));
+    seatMesh.position.y = 0.2;
+    seatMesh.castShadow = true;
+    group.add(seatMesh);
+
+    // Backrest
+    const backGeo = new THREE.BoxGeometry(w, 0.42, d * 0.24);
+    const backMesh = new THREE.Mesh(backGeo, makeMat('#334155', 0.85));
+    backMesh.position.set(0, 0.61, -d / 2 + d * 0.12);
+    backMesh.castShadow = true;
+    group.add(backMesh);
+
+    // Left & right armrests
+    const armGeo = new THREE.BoxGeometry(w * 0.1, 0.26, d);
+    const leftArm = new THREE.Mesh(armGeo, makeMat('#334155', 0.85));
+    leftArm.position.set(-w / 2 + w * 0.05, 0.52, 0);
+    const rightArm = new THREE.Mesh(armGeo, makeMat('#334155', 0.85));
+    rightArm.position.set(w / 2 - w * 0.05, 0.52, 0);
+    group.add(leftArm, rightArm);
+  } else if (item.kind === 'kitchen_counter') {
+    // Base cabinetry
+    const baseGeo = new THREE.BoxGeometry(w, 0.85, d);
+    const baseMesh = new THREE.Mesh(baseGeo, makeMat('#334155', 0.65));
+    baseMesh.position.y = 0.425;
+    baseMesh.castShadow = true;
+    group.add(baseMesh);
+
+    // Quartz countertop
+    const topGeo = new THREE.BoxGeometry(w * 1.02, 0.05, d * 1.04);
+    const topMesh = new THREE.Mesh(topGeo, makeMat('#E2E8F0', 0.3));
+    topMesh.position.y = 0.875;
+    group.add(topMesh);
+
+    // Black glass induction cooktop
+    const hobGeo = new THREE.BoxGeometry(w * 0.32, 0.02, d * 0.68);
+    const hobMesh = new THREE.Mesh(hobGeo, makeMat('#0F172A', 0.15, 0.4));
+    hobMesh.position.set(-w * 0.22, 0.905, 0);
+    group.add(hobMesh);
+
+    // Stainless kitchen sink
+    const sinkGeo = new THREE.BoxGeometry(w * 0.28, 0.02, d * 0.65);
+    const sinkMesh = new THREE.Mesh(sinkGeo, makeMat('#94A3B8', 0.25, 0.7));
+    sinkMesh.position.set(w * 0.22, 0.905, 0);
+    group.add(sinkMesh);
+  } else if (item.kind === 'dining_table' || item.kind === 'coffee_table' || item.kind === 'desk') {
+    const topY = item.kind === 'coffee_table' ? 0.42 : 0.75;
+    const topGeo = new THREE.BoxGeometry(w, 0.06, d);
+    const topMesh = new THREE.Mesh(topGeo, makeMat('#92400E', 0.55));
+    topMesh.position.y = topY;
+    topMesh.castShadow = true;
+    group.add(topMesh);
+
+    const legGeo = new THREE.CylinderGeometry(0.035, 0.03, topY, 8);
+    const legMat = makeMat('#1E293B', 0.5, 0.4);
+    const offsets = [
+      [-w * 0.42, -d * 0.4],
+      [w * 0.42, -d * 0.4],
+      [-w * 0.42, d * 0.4],
+      [w * 0.42, d * 0.4],
+    ];
+    for (const [lx, lz] of offsets) {
+      const leg = new THREE.Mesh(legGeo, legMat);
+      leg.position.set(lx, topY / 2, lz);
+      group.add(leg);
+    }
+  } else {
+    // Wardrobe, Fridge, Nightstand, TV Stand
+    const boxGeo = new THREE.BoxGeometry(w, h, d);
+    const color =
+      item.kind === 'fridge'
+        ? '#CBD5E1'
+        : item.kind === 'wardrobe'
+        ? '#78350F'
+        : '#475569';
+    const mesh = new THREE.Mesh(boxGeo, makeMat(color, 0.55));
+    mesh.position.y = h / 2;
+    mesh.castShadow = true;
+    group.add(mesh);
+  }
+
+  return group;
+}
+
 export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
   ({ pipelineResult, config, selectedRoomId, onSelectRoom, onChangeMaterialTheme }, ref) => {
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -31,12 +231,11 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
     const exportGroupRef = useRef<THREE.Group | null>(null);
     const roomMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
 
-    const [cutawayMode, setCutawayMode] = useState(false);
-    const [showWireframeEdges, setShowWireframeEdges] = useState(true);
+    // Default cutawayMode to TRUE so exterior walls don't hide interior bedrooms, bathrooms, and furniture!
+    const [cutawayMode, setCutawayMode] = useState(true);
     const [webglLost, setWebglLost] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
 
-    // Camera preset helper
     const setCameraView = (preset: 'iso' | 'top' | 'low') => {
       const camera = cameraRef.current;
       const controls = controlsRef.current;
@@ -49,13 +248,13 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
       );
 
       if (preset === 'iso') {
-        camera.position.set(span * 0.85, span * 0.78, span * 0.95);
+        camera.position.set(span * 0.78, span * 0.85, span * 0.88);
       } else if (preset === 'top') {
-        camera.position.set(0, span * 1.35, 0.01);
+        camera.position.set(0, span * 1.3, 0.01);
       } else {
-        camera.position.set(span * 0.95, span * 0.32, span * 0.95);
+        camera.position.set(span * 0.88, span * 0.35, span * 0.88);
       }
-      controls.target.set(0, config.wall_height_m * 0.35, 0);
+      controls.target.set(0, 0.9, 0);
       controls.update();
     };
 
@@ -98,7 +297,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
       resetCamera: () => setCameraView('iso'),
     }));
 
-    // Initialize WebGL Scene, Camera, Lighting, and OrbitControls
     useEffect(() => {
       const container = containerRef.current;
       if (!container) return;
@@ -108,11 +306,11 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color('#0B0D11');
-      scene.fog = new THREE.FogExp2('#0B0D11', 0.018);
+      scene.fog = new THREE.FogExp2('#0B0D11', 0.015);
       sceneRef.current = scene;
 
       const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 250);
-      camera.position.set(11, 10, 12);
+      camera.position.set(10, 10.5, 11);
       cameraRef.current = camera;
 
       const renderer = new THREE.WebGLRenderer({
@@ -124,20 +322,17 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.08;
+      renderer.toneMappingExposure = 1.1;
       rendererRef.current = renderer;
 
       container.innerHTML = '';
       container.appendChild(renderer.domElement);
 
-      // WebGL context safety handlers
       const handleContextLost = (e: Event) => {
         e.preventDefault();
         setWebglLost(true);
       };
-      const handleContextRestored = () => {
-        setWebglLost(false);
-      };
+      const handleContextRestored = () => setWebglLost(false);
       renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
       renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored);
 
@@ -147,22 +342,19 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
       controls.maxPolarAngle = Math.PI / 2 - 0.03;
       controls.minDistance = 3;
       controls.maxDistance = 45;
-      controls.target.set(0, 1.2, 0);
+      controls.target.set(0, 0.9, 0);
       controls.update();
       controlsRef.current = controls;
 
-      // Three-Point Architectural Studio Lighting
-      const hemiLight = new THREE.HemisphereLight('#E2E8F0', '#1E293B', 0.85);
+      const hemiLight = new THREE.HemisphereLight('#F1F5F9', '#1E293B', 0.95);
       hemiLight.position.set(0, 25, 0);
       scene.add(hemiLight);
 
-      const keyLight = new THREE.DirectionalLight('#FFFBEB', 1.65);
-      keyLight.position.set(14, 22, 16);
+      const keyLight = new THREE.DirectionalLight('#FFFBEB', 1.6);
+      keyLight.position.set(14, 24, 16);
       keyLight.castShadow = true;
       keyLight.shadow.mapSize.width = 2048;
       keyLight.shadow.mapSize.height = 2048;
-      keyLight.shadow.camera.near = 2;
-      keyLight.shadow.camera.far = 60;
       const d = 14;
       keyLight.shadow.camera.left = -d;
       keyLight.shadow.camera.right = d;
@@ -171,22 +363,19 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
       keyLight.shadow.bias = -0.0005;
       scene.add(keyLight);
 
-      const rimLight = new THREE.DirectionalLight('#38BDF8', 0.55);
+      const rimLight = new THREE.DirectionalLight('#38BDF8', 0.5);
       rimLight.position.set(-16, 12, -14);
       scene.add(rimLight);
 
-      // Architectural Ground Grid (1m major divisions)
-      const gridHelper = new THREE.GridHelper(32, 32, '#222938', '#161B26');
+      const gridHelper = new THREE.GridHelper(32, 32, '#222938', '#151922');
       gridHelper.position.y = -0.02;
       scene.add(gridHelper);
 
-      // Exportable 3D Model Group
       const exportGroup = new THREE.Group();
-      exportGroup.name = 'FloorForge_Architectural_Model';
+      exportGroup.name = 'FloorForge_3D_Scene';
       scene.add(exportGroup);
       exportGroupRef.current = exportGroup;
 
-      // Raycaster for clicking rooms in 3D
       const raycaster = new THREE.Raycaster();
       const pointer = new THREE.Vector2();
       let downPos = { x: 0, y: 0 };
@@ -204,18 +393,14 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
 
         const meshes = Array.from(roomMeshesRef.current.values());
         const hits = raycaster.intersectObjects(meshes, false);
-        if (hits.length > 0) {
-          const hitRoomId = hits[0].object.userData.roomId;
-          if (hitRoomId) {
-            onSelectRoom(hitRoomId);
-          }
+        if (hits.length > 0 && hits[0].object.userData.roomId) {
+          onSelectRoom(hits[0].object.userData.roomId);
         }
       };
 
       renderer.domElement.addEventListener('pointerdown', onPointerDown);
       renderer.domElement.addEventListener('pointerup', onPointerUp);
 
-      // Resize observer
       const resizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) {
           const { width: cw, height: ch } = entry.contentRect;
@@ -247,118 +432,49 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
       };
     }, []);
 
-    // Rebuild 3D geometry whenever pipelineResult, config, selectedRoomId, or cutawayMode changes
     useEffect(() => {
       const exportGroup = exportGroupRef.current;
       if (!exportGroup) return;
 
-      // Clear previous meshes
       while (exportGroup.children.length > 0) {
-        const child = exportGroup.children[0];
-        exportGroup.remove(child);
+        exportGroup.remove(exportGroup.children[0]);
       }
       roomMeshesRef.current.clear();
 
       const { model3d } = pipelineResult;
       const theme = config.material_theme;
+      const isEpistemic = theme === 'epistemic_confidence';
 
-      // Material palettes by architectural theme
-      const exteriorWallMat = new THREE.MeshStandardMaterial({
-        color:
-          theme === 'clay'
-            ? '#E2E8F0'
-            : theme === 'timber'
-            ? '#F8FAFC'
-            : '#1E293B',
-        roughness: theme === 'blueprint' ? 0.35 : 0.72,
-        metalness: theme === 'blueprint' ? 0.2 : 0.05,
-        transparent: theme === 'blueprint',
-        opacity: theme === 'blueprint' ? 0.78 : 1.0,
-      });
-
-      const interiorWallMat = new THREE.MeshStandardMaterial({
-        color:
-          theme === 'clay'
-            ? '#CBD5E1'
-            : theme === 'timber'
-            ? '#E2E8F0'
-            : '#334155',
-        roughness: 0.78,
-        metalness: 0.05,
-        transparent: theme === 'blueprint',
-        opacity: theme === 'blueprint' ? 0.65 : 1.0,
-      });
-
-      const doorMat = new THREE.MeshStandardMaterial({
-        color: theme === 'blueprint' ? '#F59E0B' : '#B45309',
-        roughness: 0.5,
-        metalness: 0.15,
-      });
-
-      const windowGlassMat = new THREE.MeshPhysicalMaterial({
-        color: '#38BDF8',
-        transparent: true,
-        opacity: 0.36,
-        roughness: 0.1,
-        metalness: 0.1,
-        transmission: 0.5,
-      });
-
-      const frameMat = new THREE.MeshStandardMaterial({
-        color: '#0F172A',
-        roughness: 0.4,
-        metalness: 0.5,
-      });
-
-      const edgeLineMat = new THREE.LineBasicMaterial({
-        color: theme === 'blueprint' ? '#38BDF8' : '#334155',
-        transparent: true,
-        opacity: theme === 'blueprint' ? 0.75 : 0.4,
-      });
-
-      // 1. Build Base Architectural Plinth beneath all rooms
+      // 1. Base Plinth
       const plinthGeo = new THREE.BoxGeometry(
-        model3d.bounding_box_m.width + 0.8,
+        model3d.bounding_box_m.width + 0.6,
         0.08,
-        model3d.bounding_box_m.depth + 0.8
+        model3d.bounding_box_m.depth + 0.6
       );
-      const plinthMat = new THREE.MeshStandardMaterial({
-        color: '#161B26',
-        roughness: 0.9,
-      });
-      const plinthMesh = new THREE.Mesh(plinthGeo, plinthMat);
+      const plinthMesh = new THREE.Mesh(
+        plinthGeo,
+        new THREE.MeshStandardMaterial({ color: '#161B26', roughness: 0.9 })
+      );
       plinthMesh.position.set(0, -0.04, 0);
       plinthMesh.receiveShadow = true;
-      plinthMesh.name = 'Base_Foundation_Plinth';
       exportGroup.add(plinthMesh);
 
-      // 2. Build Room Floor Slabs
+      // 2. Room Floor Slabs (Distinct architectural materials per room type)
       if (config.include_floor_slabs) {
-        const roomColorsClay: Record<string, string> = {
-          living: '#334155',
-          bedroom: '#3B4252',
-          kitchen: '#2E3440',
-          bathroom: '#243B4A',
-          hallway: '#29303D',
-          office: '#37304A',
-          utility: '#272E38',
-          balcony: '#1F3A38',
-        };
-        const roomColorsTimber: Record<string, string> = {
-          living: '#855836',
-          bedroom: '#734B2D',
-          kitchen: '#475569',
-          bathroom: '#334155',
-          hallway: '#7C5233',
-          office: '#694429',
-          utility: '#475569',
-          balcony: '#52525B',
+        const roomColorsStudio: Record<string, string> = {
+          living: '#8C6239', // Warm oak parquet
+          bedroom: '#754C29', // Walnut timber floor
+          kitchen: '#475569', // Slate porcelain tile
+          bathroom: '#1E3A4C', // Spa ceramic mosaic tile
+          hallway: '#7E5734',
+          office: '#6B4628',
+          utility: '#334155',
+          balcony: '#3F4E4F',
         };
 
         for (const slab of model3d.room_slabs) {
           if (slab.points_m.length < 3) continue;
           const shape = new THREE.Shape();
-          // Note: shape is in XY plane; we rotate X by +90deg so shape Y maps to +Z
           shape.moveTo(slab.points_m[0].x, slab.points_m[0].y);
           for (let i = 1; i < slab.points_m.length; i++) {
             shape.lineTo(slab.points_m[i].x, slab.points_m[i].y);
@@ -372,49 +488,72 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
           extrudeGeo.rotateX(Math.PI / 2);
 
           const isSelected = selectedRoomId === slab.id;
-          const baseColor =
-            theme === 'timber'
-              ? roomColorsTimber[slab.category] || '#855836'
-              : theme === 'blueprint'
-              ? '#0F172A'
-              : roomColorsClay[slab.category] || '#334155';
+          const isGen = slab.provenance === 'generated_completion';
+          const color = isSelected
+            ? '#D97706'
+            : isEpistemic
+            ? isGen
+              ? '#78350F'
+              : '#064E3B'
+            : theme === 'blueprint'
+            ? '#0F172A'
+            : roomColorsStudio[slab.category] || '#475569';
 
-          const slabMat = new THREE.MeshStandardMaterial({
-            color: isSelected ? '#D97706' : baseColor,
-            roughness: 0.65,
-            metalness: 0.08,
-          });
-
-          const mesh = new THREE.Mesh(extrudeGeo, slabMat);
+          const mesh = new THREE.Mesh(
+            extrudeGeo,
+            new THREE.MeshStandardMaterial({
+              color,
+              roughness: slab.category === 'bathroom' ? 0.35 : 0.65,
+              metalness: 0.08,
+            })
+          );
           mesh.position.y = 0.05;
           mesh.receiveShadow = true;
-          mesh.name = `Room_${slab.id}_${slab.name.replace(/\s+/g, '_')}`;
-          mesh.userData = { roomId: slab.id, roomName: slab.name, areaM2: slab.area_m2 };
+          mesh.userData = { roomId: slab.id };
           exportGroup.add(mesh);
           roomMeshesRef.current.set(slab.id, mesh);
         }
       }
 
-      // 3. Build Extruded Wall Segments (Full Walls, Lintels, Sills)
+      // 3. Extruded Exterior & Interior Partition Walls
       for (const seg of model3d.wall_segments) {
         const dx = seg.end_m.x - seg.start_m.x;
         const dz = seg.end_m.y - seg.start_m.y;
         const length = Math.hypot(dx, dz);
         if (length < 0.02) continue;
 
-        // In Dollhouse Cutaway mode, cap exterior walls to 1.05m for unobstructed interior viewing
-        const effectiveMaxY =
-          cutawayMode && seg.is_exterior ? Math.min(config.wall_height_m, 1.05) : config.wall_height_m;
+        // In Cutaway Dollhouse Mode: exterior walls drop to 0.95m waist height while interior room walls stay higher (1.95m) so every room & object is clearly visible!
+        const effectiveMaxY = cutawayMode
+          ? seg.is_exterior
+            ? Math.min(config.wall_height_m, 0.95)
+            : Math.min(config.wall_height_m, 1.95)
+          : config.wall_height_m;
 
         if (seg.bottom_y_m >= effectiveMaxY) continue;
         const effectiveHeight = Math.min(seg.height_m, effectiveMaxY - seg.bottom_y_m);
         if (effectiveHeight <= 0.02) continue;
 
+        const isGen = seg.provenance === 'generated_completion';
+        const wallColor = isEpistemic
+          ? isGen
+            ? '#F59E0B'
+            : '#10B981'
+          : theme === 'blueprint'
+          ? '#1E293B'
+          : seg.is_exterior
+          ? '#F1F5F9'
+          : '#CBD5E1';
+
+        const wallMat = new THREE.MeshStandardMaterial({
+          color: wallColor,
+          roughness: 0.72,
+          metalness: 0.05,
+          transparent: theme === 'blueprint' || (isEpistemic && isGen),
+          opacity: theme === 'blueprint' ? 0.75 : isEpistemic && isGen ? 0.68 : 1.0,
+        });
+
         const boxGeo = new THREE.BoxGeometry(length, effectiveHeight, seg.thickness_m);
-        const wallMesh = new THREE.Mesh(
-          boxGeo,
-          seg.is_exterior ? exteriorWallMat : interiorWallMat
-        );
+        const wallMesh = new THREE.Mesh(boxGeo, wallMat);
 
         const midX = (seg.start_m.x + seg.end_m.x) / 2;
         const midZ = (seg.start_m.y + seg.end_m.y) / 2;
@@ -425,107 +564,156 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
         wallMesh.rotation.y = -angle;
         wallMesh.castShadow = true;
         wallMesh.receiveShadow = true;
-        wallMesh.name = `Wall_${seg.id}`;
         exportGroup.add(wallMesh);
 
-        if (showWireframeEdges) {
-          const edgesGeo = new THREE.EdgesGeometry(boxGeo);
-          const line = new THREE.LineSegments(edgesGeo, edgeLineMat);
-          wallMesh.add(line);
-        }
+        const edgesGeo = new THREE.EdgesGeometry(boxGeo);
+        const edgeMat = new THREE.LineBasicMaterial({
+          color: isEpistemic
+            ? isGen
+              ? '#FDE68A'
+              : '#6EE7B7'
+            : theme === 'blueprint'
+            ? '#38BDF8'
+            : '#475569',
+          transparent: true,
+          opacity: 0.45,
+        });
+        wallMesh.add(new THREE.LineSegments(edgesGeo, edgeMat));
       }
 
-      // 4. Build 3D Doors & Windows
-      if (config.include_openings_3d && !cutawayMode) {
+      // 4. Doors & Windows
+      if (config.include_openings_3d) {
+        const frameMat = new THREE.MeshStandardMaterial({ color: '#0F172A', roughness: 0.4 });
+        const doorMat = new THREE.MeshStandardMaterial({
+          color: isEpistemic ? '#10B981' : '#B45309',
+          roughness: 0.5,
+        });
+        const glassMat = new THREE.MeshPhysicalMaterial({
+          color: '#38BDF8',
+          transparent: true,
+          opacity: 0.38,
+          roughness: 0.1,
+        });
+
         for (const op of model3d.openings) {
+          const maxOpH = cutawayMode ? Math.min(op.height_m, 1.5) : op.height_m;
+          if (maxOpH <= 0.2) continue;
+
           const group = new THREE.Group();
-          group.position.set(op.center_m.x, op.sill_y_m + op.height_m / 2, op.center_m.y);
+          group.position.set(op.center_m.x, op.sill_y_m + maxOpH / 2, op.center_m.y);
           group.rotation.y = -op.angle_rad;
-          group.name = `Opening_${op.id}`;
 
           if (op.kind === 'window') {
-            // Window glass pane + perimeter mullion frame
-            const glassGeo = new THREE.BoxGeometry(op.width_m, op.height_m, 0.03);
-            const glassMesh = new THREE.Mesh(glassGeo, windowGlassMat);
+            const glassMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(op.width_m, maxOpH, 0.03),
+              glassMat
+            );
             group.add(glassMesh);
-
-            // Top and bottom frame rails
-            const railGeo = new THREE.BoxGeometry(op.width_m, 0.05, op.thickness_m * 1.05);
-            const topRail = new THREE.Mesh(railGeo, frameMat);
-            topRail.position.y = op.height_m / 2 - 0.025;
-            const botRail = new THREE.Mesh(railGeo, frameMat);
-            botRail.position.y = -op.height_m / 2 + 0.025;
-            group.add(topRail, botRail);
-
-            // Center vertical mullion
-            const mullionGeo = new THREE.BoxGeometry(0.04, op.height_m, op.thickness_m * 1.02);
-            const mullion = new THREE.Mesh(mullionGeo, frameMat);
-            group.add(mullion);
           } else {
-            // Architectural Door Frame + Slightly Ajar Panel (25 degrees open)
-            const jambGeo = new THREE.BoxGeometry(0.05, op.height_m, op.thickness_m * 1.08);
-            const leftJamb = new THREE.Mesh(jambGeo, frameMat);
-            leftJamb.position.x = -op.width_m / 2 + 0.025;
-            const rightJamb = new THREE.Mesh(jambGeo, frameMat);
-            rightJamb.position.x = op.width_m / 2 - 0.025;
-            group.add(leftJamb, rightJamb);
-
-            const leafWidth = Math.max(0.4, op.width_m - 0.08);
+            const leafWidth = Math.max(0.4, op.width_m - 0.06);
             const pivot = new THREE.Group();
-            pivot.position.set(-op.width_m / 2 + 0.04, 0, 0);
-            pivot.rotation.y = 0.42; // Partially open door leaf for spatial clarity
-
-            const leafGeo = new THREE.BoxGeometry(leafWidth, op.height_m - 0.04, 0.045);
-            const leafMesh = new THREE.Mesh(leafGeo, doorMat);
+            pivot.position.set(-op.width_m / 2 + 0.03, 0, 0);
+            pivot.rotation.y = 0.48;
+            const leafMesh = new THREE.Mesh(
+              new THREE.BoxGeometry(leafWidth, maxOpH, 0.045),
+              doorMat
+            );
             leafMesh.position.x = leafWidth / 2;
             leafMesh.castShadow = true;
             pivot.add(leafMesh);
             group.add(pivot);
-          }
 
+            const jamb = new THREE.Mesh(
+              new THREE.BoxGeometry(0.05, maxOpH, op.thickness_m * 1.06),
+              frameMat
+            );
+            jamb.position.x = -op.width_m / 2 + 0.025;
+            group.add(jamb);
+          }
           exportGroup.add(group);
         }
       }
-    }, [pipelineResult, config, selectedRoomId, cutawayMode, showWireframeEdges]);
 
-    const { bounding_box_m, total_floor_area_m2, total_wall_linear_m } = pipelineResult.model3d;
+      // 5. 3D Furniture & Bathroom/Kitchen Fixtures (Beds, Bathtubs, Toilets, Sinks, Sofas, Kitchens, Desks)
+      for (const item of model3d.furniture) {
+        const furnObj = buildFurniture3DObject(item, isEpistemic);
+        exportGroup.add(furnObj);
+      }
+
+      // 6. PS06 Mode B Novelty: Render Walkthrough Video Camera Frustum Cone when in Mode B Fusion!
+      if (config.input_mode === 'mode_b_video_fusion') {
+        const camGroup = new THREE.Group();
+        camGroup.position.set(-2.2, 1.4, -0.5);
+        const coneGeo = new THREE.ConeGeometry(2.6, 5.2, 4, 1, true);
+        coneGeo.rotateX(Math.PI / 2);
+        coneGeo.rotateZ(Math.PI / 4);
+        const coneMat = new THREE.MeshBasicMaterial({
+          color: '#38BDF8',
+          wireframe: true,
+          transparent: true,
+          opacity: 0.65,
+        });
+        const coneMesh = new THREE.Mesh(coneGeo, coneMat);
+        coneMesh.position.z = 2.6;
+        camGroup.rotation.y = -0.65;
+        camGroup.add(coneMesh);
+        exportGroup.add(camGroup);
+      }
+    }, [pipelineResult, config, selectedRoomId, cutawayMode]);
+
+    const { bounding_box_m, total_floor_area_m2, epistemic_stats } = pipelineResult.model3d;
     const selectedRoom = pipelineResult.rooms.find((r) => r.id === selectedRoomId);
 
     return (
       <div className="relative flex flex-col h-full w-full bg-[#0B0D11] select-none overflow-hidden">
-        {/* Pane Sub-Header: 3D Viewport & Material / Camera Controls */}
+        {/* Clean 3D Sub-Header */}
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-[#12161F] border-b border-[#222938]">
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-semibold text-[#F1F5F9] tracking-tight">
-              3D Spatial Model (Three.js WebGL)
-            </span>
+          <div className="flex items-center gap-2.5">
+            <span className="text-xs font-semibold text-[#F1F5F9]">3D Furnished Scene</span>
             <span className="text-xs text-[#64748B]" aria-hidden="true">·</span>
             <span className="text-xs font-mono text-[#94A3B8] tabular-nums">
-              {bounding_box_m.width.toFixed(1)}m × {bounding_box_m.depth.toFixed(1)}m × {config.wall_height_m.toFixed(1)}m
-            </span>
-            <span className="text-xs text-[#64748B]" aria-hidden="true">·</span>
-            <span className="text-xs font-mono text-[#38BDF8] tabular-nums">
-              {total_floor_area_m2.toFixed(1)} m² Floor
+              {bounding_box_m.width.toFixed(1)}m × {bounding_box_m.depth.toFixed(1)}m ({total_floor_area_m2.toFixed(1)} m²)
             </span>
           </div>
 
-          {/* Interactive Material & View Mode Controls */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            {/* Material & PS06 Epistemic Provenance Switcher */}
             <div className="flex items-center gap-1 bg-[#0B0D11] p-1 rounded-md border border-[#222938]">
-              {(['clay', 'timber', 'blueprint'] as const).map((theme) => (
-                <button
-                  key={theme}
-                  type="button"
-                  onClick={() => onChangeMaterialTheme(theme)}
-                  className={`px-2 py-1 text-xs font-medium rounded capitalize transition-colors whitespace-nowrap ${
-                    config.material_theme === theme
-                      ? 'bg-[#181D29] text-[#F1F5F9] shadow-xs'
-                      : 'text-[#64748B] hover:text-[#94A3B8]'
-                  }`}
-                >
-                  {theme}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={() => onChangeMaterialTheme('studio')}
+                className={`px-2 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                  config.material_theme === 'studio'
+                    ? 'bg-[#181D29] text-[#F1F5F9]'
+                    : 'text-[#64748B] hover:text-[#94A3B8]'
+                }`}
+              >
+                Studio Materials
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeMaterialTheme('epistemic_confidence')}
+                className={`px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1 whitespace-nowrap ${
+                  config.material_theme === 'epistemic_confidence'
+                    ? 'bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/40'
+                    : 'text-[#64748B] hover:text-[#94A3B8]'
+                }`}
+                title="PS06 Novelty: Color-code Observed (Emerald) vs AI-Completed (Amber) geometry"
+              >
+                <ShieldCheck className="w-3 h-3" />
+                <span>PS06 Provenance Map</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeMaterialTheme('blueprint')}
+                className={`px-2 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                  config.material_theme === 'blueprint'
+                    ? 'bg-[#181D29] text-[#F1F5F9]'
+                    : 'text-[#64748B] hover:text-[#94A3B8]'
+                }`}
+              >
+                CAD Wire
+              </button>
             </div>
 
             <button
@@ -536,45 +724,45 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
                   ? 'bg-[#D97706]/20 border-[#D97706] text-[#F59E0B]'
                   : 'bg-[#0B0D11] border-[#222938] text-[#94A3B8] hover:text-[#F1F5F9]'
               }`}
-              title="Lower exterior walls to 1.05m for dollhouse interior inspection"
+              title="Toggle Dollhouse Cutaway to see inside bedrooms, bathrooms, and furniture"
             >
               <Layers className="w-3.5 h-3.5" />
-              <span>Cutaway</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowWireframeEdges((v) => !v)}
-              className={`px-2.5 py-1 text-xs font-medium rounded border transition-colors whitespace-nowrap flex items-center gap-1 ${
-                showWireframeEdges
-                  ? 'bg-[#181D29] border-[#222938] text-[#F1F5F9]'
-                  : 'bg-[#0B0D11] border-[#222938] text-[#64748B]'
-              }`}
-              title="Toggle architectural edge outlines"
-            >
-              <Box className="w-3.5 h-3.5" />
-              <span>Edges</span>
+              <span>{cutawayMode ? 'Dollhouse Cutaway' : 'Full Height Walls'}</span>
             </button>
           </div>
         </div>
 
-        {/* WebGL Canvas Host */}
+        {/* WebGL Canvas */}
         <div className="relative flex-1 w-full h-full overflow-hidden">
           <div ref={containerRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
-          {/* WebGL Context Lost Fallback */}
           {webglLost && (
             <div className="absolute inset-0 bg-[#0B0D11]/95 flex flex-col items-center justify-center gap-2 p-6 text-center z-20">
               <p className="text-sm font-semibold text-[#F1F5F9]">WebGL Context Paused</p>
-              <p className="text-xs text-[#94A3B8] max-w-sm">
-                The 3D hardware context was suspended. Click below to restore the spatial viewport.
-              </p>
             </div>
           )}
 
-          {/* Selected Room Floating HUD Card */}
+          {/* PS06 Epistemic Provenance Floating Legend when active */}
+          {config.material_theme === 'epistemic_confidence' && (
+            <div className="absolute top-3 right-4 z-10 px-3 py-2 rounded-md bg-[#0B0D11]/90 backdrop-blur-md border border-[#222938] text-xs space-y-1 pointer-events-none">
+              <div className="font-semibold text-[#F8FAFC]">
+                PS06 Epistemic Honesty Overlay ({epistemic_stats.observed_ratio_pct}% Observed)
+              </div>
+              <div className="flex items-center gap-3 text-[#94A3B8]">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-xs bg-[#10B981] inline-block" />
+                  <span>Observed ({epistemic_stats.observed_count})</span>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-xs bg-[#F59E0B] inline-block" />
+                  <span>AI Completed ({epistemic_stats.completed_count})</span>
+                </span>
+              </div>
+            </div>
+          )}
+
           {selectedRoom && (
-            <div className="absolute top-3 left-4 z-10 px-3.5 py-2.5 rounded-md bg-[#0B0D11]/85 backdrop-blur-md border border-[#D97706]/50 text-xs max-w-xs pointer-events-auto">
+            <div className="absolute top-3 left-4 z-10 px-3.5 py-2.5 rounded-md bg-[#0B0D11]/90 backdrop-blur-md border border-[#D97706]/50 text-xs max-w-xs pointer-events-auto">
               <div className="flex items-center justify-between gap-4">
                 <span className="font-semibold text-[#F8FAFC]">{selectedRoom.name}</span>
                 <button
@@ -591,14 +779,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
                 <span>
                   {selectedRoom.width_m.toFixed(2)}m × {selectedRoom.length_m.toFixed(2)}m
                 </span>
-                <span>·</span>
-                <span>Perim {selectedRoom.perimeter_m.toFixed(1)}m</span>
               </div>
             </div>
           )}
 
-          {/* Bottom Floating Camera & GLB Export HUD */}
-          <div className="absolute bottom-3 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-md bg-[#0B0D11]/85 backdrop-blur-md border border-[#222938] text-xs pointer-events-auto">
+          {/* Bottom Camera & Export Controls */}
+          <div className="absolute bottom-3 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-md bg-[#0B0D11]/90 backdrop-blur-md border border-[#222938] text-xs pointer-events-auto">
             <div className="flex items-center gap-1.5">
               <Compass className="w-3.5 h-3.5 text-[#38BDF8] mr-1" />
               <button
@@ -620,32 +806,27 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
                 onClick={() => setCameraView('low')}
                 className="px-2 py-1 rounded bg-[#181D29] hover:bg-[#222938] text-[#F1F5F9] transition-colors whitespace-nowrap"
               >
-                Eye-Level
+                Interior View
               </button>
               <button
                 type="button"
                 onClick={() => setCameraView('iso')}
                 className="p-1 rounded bg-[#181D29] hover:bg-[#222938] text-[#94A3B8] hover:text-[#F1F5F9] transition-colors"
-                title="Reset Orbit Camera"
+                title="Reset Camera"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            <div className="flex items-center gap-3">
-              <span className="hidden xl:inline text-[#94A3B8] font-mono tabular-nums">
-                Linear Walls: {total_wall_linear_m.toFixed(1)}m
-              </span>
-              <button
-                type="button"
-                onClick={handleExportGLB}
-                disabled={isExporting}
-                className="px-3 py-1 bg-[#D97706] hover:bg-[#F59E0B] text-[#F8FAFC] font-semibold rounded transition-colors flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>{isExporting ? 'Exporting...' : 'Download .GLB'}</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleExportGLB}
+              disabled={isExporting}
+              className="px-3 py-1 bg-[#D97706] hover:bg-[#F59E0B] text-[#F8FAFC] font-semibold rounded transition-colors flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{isExporting ? 'Exporting...' : 'Download .GLB'}</span>
+            </button>
           </div>
         </div>
       </div>

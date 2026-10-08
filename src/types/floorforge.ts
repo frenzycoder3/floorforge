@@ -10,6 +10,24 @@ export type RoomCategory =
   | 'utility'
   | 'balcony';
 
+export type EpistemicProvenance = 'observed' | 'generated_completion';
+
+export type FurnitureCategory =
+  | 'bed'
+  | 'nightstand'
+  | 'wardrobe'
+  | 'sofa'
+  | 'coffee_table'
+  | 'tv_stand'
+  | 'dining_table'
+  | 'kitchen_counter'
+  | 'fridge'
+  | 'bathtub'
+  | 'toilet'
+  | 'sink_vanity'
+  | 'shower'
+  | 'desk';
+
 export interface Point2D {
   x: number;
   y: number;
@@ -22,6 +40,7 @@ export interface WallSegment {
   thickness_px: number;
   is_exterior: boolean;
   confidence: number;
+  provenance?: EpistemicProvenance;
 }
 
 export interface OpeningElement {
@@ -35,6 +54,24 @@ export interface OpeningElement {
   sill_height_m: number;
   head_height_m: number;
   confidence: number;
+  provenance?: EpistemicProvenance;
+}
+
+export interface FurnitureElement {
+  id: string;
+  room_id: string;
+  kind: FurnitureCategory;
+  label: string;
+  /** Center position in blueprint pixel coordinates */
+  center_px: Point2D;
+  /** Width & depth in blueprint pixels */
+  width_px: number;
+  depth_px: number;
+  height_m: number;
+  rotation_deg: number;
+  confidence: number;
+  /** PS06 Novelty: Whether directly observed in blueprint/video or plausibly completed */
+  provenance: EpistemicProvenance;
 }
 
 export interface RoomPolygon {
@@ -48,6 +85,7 @@ export interface RoomPolygon {
   width_m: number;
   length_m: number;
   confidence: number;
+  provenance?: EpistemicProvenance;
 }
 
 export interface ScaleEstimation {
@@ -66,6 +104,8 @@ export interface PipelineWarning {
   element_id?: string;
 }
 
+export type AblationMode = 'baseline_shell' | 'walls_and_rooms' | 'full_floorforge';
+
 export interface PipelineConfig {
   wall_height_m: number;
   wall_thickness_m: number;
@@ -75,7 +115,14 @@ export interface PipelineConfig {
   manhattan_snap: boolean;
   include_floor_slabs: boolean;
   include_openings_3d: boolean;
-  material_theme: 'clay' | 'timber' | 'blueprint';
+  include_furniture_3d: boolean;
+  show_generated_completion: boolean;
+  /** PS06 Novelty: Visual mode separating Observed (Emerald/Cyan) vs AI-Completed (Amber) geometry */
+  material_theme: 'studio' | 'epistemic_confidence' | 'blueprint';
+  /** PS06 Research Contribution: Ablation mode comparing Baseline vs Full FloorForge */
+  ablation_mode: AblationMode;
+  /** PS06 Mode A (Floor Plan) vs Mode B (Blueprint-Guided Video Completion with Camera Frustum) */
+  input_mode: 'mode_a_blueprint' | 'mode_b_video_fusion';
 }
 
 export interface WallMeshSegment3D {
@@ -88,6 +135,8 @@ export interface WallMeshSegment3D {
   thickness_m: number;
   is_exterior: boolean;
   segment_type: 'full_wall' | 'lintel' | 'sill';
+  provenance: EpistemicProvenance;
+  confidence: number;
 }
 
 export interface OpeningMesh3D {
@@ -99,6 +148,21 @@ export interface OpeningMesh3D {
   sill_y_m: number;
   height_m: number;
   thickness_m: number;
+  provenance: EpistemicProvenance;
+}
+
+export interface FurnitureMesh3D {
+  id: string;
+  room_id: string;
+  kind: FurnitureCategory;
+  label: string;
+  center_m: Point2D;
+  width_m: number;
+  depth_m: number;
+  height_m: number;
+  rotation_rad: number;
+  provenance: EpistemicProvenance;
+  confidence: number;
 }
 
 export interface RoomSlabMesh3D {
@@ -109,6 +173,7 @@ export interface RoomSlabMesh3D {
   centroid_m: Point2D;
   area_m2: number;
   dimensions_label: string;
+  provenance: EpistemicProvenance;
 }
 
 export interface Built3DModelDescriptor {
@@ -121,9 +186,17 @@ export interface Built3DModelDescriptor {
   };
   wall_segments: WallMeshSegment3D[];
   openings: OpeningMesh3D[];
+  furniture: FurnitureMesh3D[];
   room_slabs: RoomSlabMesh3D[];
   total_floor_area_m2: number;
   total_wall_linear_m: number;
+  epistemic_stats: {
+    observed_count: number;
+    completed_count: number;
+    observed_ratio_pct: number;
+    layout_iou_vs_baseline: number;
+    dimension_error_cm: number;
+  };
 }
 
 export interface FloorPlanPipelineResult {
@@ -136,6 +209,7 @@ export interface FloorPlanPipelineResult {
   stage_timings_ms: Record<PipelineStageId, number>;
   walls: WallSegment[];
   openings: OpeningElement[];
+  furniture: FurnitureElement[];
   rooms: RoomPolygon[];
   scale: ScaleEstimation;
   warnings: PipelineWarning[];
@@ -152,6 +226,7 @@ export interface BlueprintPreset {
   default_m_per_px: number;
   walls: WallSegment[];
   openings: OpeningElement[];
+  furniture: FurnitureElement[];
   rooms: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'length_m'>[];
   warnings: PipelineWarning[];
 }

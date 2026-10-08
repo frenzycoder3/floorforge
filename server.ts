@@ -3,14 +3,13 @@ import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 dotenv.config();
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
 
-// Initialize Gemini client on server-side with required User-Agent header
 function getGenAI() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
@@ -26,7 +25,6 @@ function getGenAI() {
   });
 }
 
-// Endpoint to inspect the Python FastAPI reference files directly from the UI
 app.get('/api/fastapi-source', (_req, res) => {
   const files = [
     'backend/main.py',
@@ -48,7 +46,6 @@ app.get('/api/fastapi-source', (_req, res) => {
   res.json({ files: payload });
 });
 
-// Server-side AI floor-plan segmentation & vectorization endpoint using Gemini Vision
 app.post('/api/pipeline/analyze', async (req, res) => {
   try {
     const { imageBase64, mimeType, imageWidth = 1000, imageHeight = 750, blueprintName = 'Uploaded Plan' } = req.body;
@@ -62,20 +59,21 @@ app.post('/api/pipeline/analyze', async (req, res) => {
     if (!ai) {
       res.status(200).json({
         fallbackToMock: true,
-        reason: 'GEMINI_API_KEY not configured; falling back to local modular pipeline.',
+        reason: 'GEMINI_API_KEY not configured; using fast local multi-room + furniture pipeline.',
       });
       return;
     }
 
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
 
-    const prompt = `You are FloorForge (HNX26EPS06), an architectural 2D floor-plan segmentation and vectorization engine.
-Analyze this floor-plan image (coordinate system: X from 0 to ${imageWidth}, Y from 0 to ${imageHeight}, where (0,0) is top-left).
-Perform the 4-stage analysis:
-1. Detect all structural exterior and interior walls as straight line segments (start X,Y to end X,Y). Snap orthogonal walls so horizontal walls share identical Y and vertical walls share identical X. Ensure exterior walls form a closed perimeter around the floor plan.
-2. Detect doors and windows along those walls, specifying parent wall_id, normalized position_t (0.05 to 0.95 along the wall), width_px, and kind ("door" or "window").
-3. Detect enclosed rooms as closed 4-to-8 point polygons (in pixel coordinates 0..${imageWidth}, 0..${imageHeight}), with architectural room names and categories ("living", "bedroom", "kitchen", "bathroom", "hallway", "office", "utility", "balcony").
-4. Estimate scale (meters_per_pixel) by reading any visible dimension text in the floor plan or using standard 0.90m door widths, plus list any architectural topology or scale warnings.`;
+    const prompt = `You are FloorForge (HNX26EPS06), a 2D floor-plan to 3D scene & furniture reconstruction engine.
+Analyze this floor-plan image (coordinates: X from 0 to ${imageWidth}, Y from 0 to ${imageHeight}, top-left is 0,0).
+CRITICAL REQUIREMENTS:
+1. Detect BOTH the exterior perimeter walls AND all interior room partition walls (separating bedrooms, bathrooms, kitchen, living room, hallway). Do NOT return only outer borders.
+2. Detect doors and windows along walls.
+3. Detect all enclosed rooms ("living", "bedroom", "kitchen", "bathroom", "hallway", "office", "balcony") as 4-point polygons.
+4. Detect or plausibly complete interior furniture and bathroom/kitchen fixtures ("bed", "nightstand", "wardrobe", "sofa", "coffee_table", "tv_stand", "dining_table", "kitchen_counter", "fridge", "bathtub", "toilet", "sink_vanity", "desk") inside each room, marking provenance as "observed" if drawn on the plan or "generated_completion" if inferred from room semantics.
+5. Estimate scale (meters_per_pixel).`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -83,7 +81,7 @@ Perform the 4-stage analysis:
         parts: [
           {
             inlineData: {
-              mimeType: mimeType || 'image/png',
+              mimeType: mimeType || 'image/jpeg',
               data: cleanBase64,
             },
           },
@@ -91,6 +89,7 @@ Perform the 4-stage analysis:
         ],
       },
       config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -108,6 +107,7 @@ Perform the 4-stage analysis:
                   thickness_px: { type: Type.NUMBER },
                   is_exterior: { type: Type.BOOLEAN },
                   confidence: { type: Type.NUMBER },
+                  provenance: { type: Type.STRING },
                 },
                 required: ['id', 'startX', 'startY', 'endX', 'endY', 'thickness_px', 'is_exterior', 'confidence'],
               },
@@ -122,8 +122,8 @@ Perform the 4-stage analysis:
                   wall_id: { type: Type.STRING },
                   position_t: { type: Type.NUMBER },
                   width_px: { type: Type.NUMBER },
-                  swing_direction: { type: Type.STRING },
                   confidence: { type: Type.NUMBER },
+                  provenance: { type: Type.STRING },
                 },
                 required: ['id', 'kind', 'wall_id', 'position_t', 'width_px', 'confidence'],
               },
@@ -148,8 +148,28 @@ Perform the 4-stage analysis:
                     },
                   },
                   confidence: { type: Type.NUMBER },
+                  provenance: { type: Type.STRING },
                 },
                 required: ['id', 'name', 'category', 'points', 'confidence'],
+              },
+            },
+            furniture: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  room_id: { type: Type.STRING },
+                  kind: { type: Type.STRING },
+                  label: { type: Type.STRING },
+                  centerX: { type: Type.NUMBER },
+                  centerY: { type: Type.NUMBER },
+                  width_px: { type: Type.NUMBER },
+                  depth_px: { type: Type.NUMBER },
+                  rotation_deg: { type: Type.NUMBER },
+                  provenance: { type: Type.STRING },
+                },
+                required: ['id', 'room_id', 'kind', 'label', 'centerX', 'centerY', 'width_px', 'depth_px', 'provenance'],
               },
             },
             scale: {
@@ -163,47 +183,26 @@ Perform the 4-stage analysis:
               },
               required: ['method', 'meters_per_pixel', 'confidence', 'reference_label'],
             },
-            warnings: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  code: { type: Type.STRING },
-                  severity: { type: Type.STRING },
-                  stage: { type: Type.STRING },
-                  message: { type: Type.STRING },
-                },
-                required: ['code', 'severity', 'stage', 'message'],
-              },
-            },
           },
-          required: ['walls', 'openings', 'rooms', 'scale', 'warnings'],
+          required: ['walls', 'openings', 'rooms', 'scale'],
         },
       },
     });
 
     const rawText = response.text;
     if (!rawText) {
-      res.status(200).json({
-        fallbackToMock: true,
-        reason: 'Empty response from vision model; using deterministic mock pipeline.',
-      });
+      res.status(200).json({ fallbackToMock: true, reason: 'Empty model output' });
       return;
     }
 
-    const parsed = JSON.parse(rawText);
     res.json({
       fallbackToMock: false,
       blueprintName,
-      data: parsed,
+      data: JSON.parse(rawText),
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error during Gemini Vision analysis';
-    console.error('Gemini Vision pipeline error:', message);
-    res.status(200).json({
-      fallbackToMock: true,
-      reason: message,
-    });
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    res.status(200).json({ fallbackToMock: true, reason: message });
   }
 });
 
