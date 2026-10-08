@@ -75,12 +75,12 @@ app.post('/api/pipeline/analyze', async (req, res) => {
 All coordinates MUST use a normalized 0 to 1000 scale where (x=0, y=0) is top-left and (x=1000, y=1000) is bottom-right.
 
 STRICT ACCURACY RULES:
-1. WALLS: Detect all visible exterior perimeter walls and interior room partition walls. Return each wall segment with start (x1, y1) and end (x2, y2) in 0..1000 coordinates, and is_exterior (true for outer boundary walls, false for interior partition walls).
-2. ROOMS: Detect each enclosed room or zone visible in the floor plan. Return its bounding box (xmin, ymin, xmax, ymax) in 0..1000 coordinates, its exact text label if written on the plan (or accurate room name like "Bedroom", "Bathroom", "Kitchen", "Living Room", "Hallway", "Balcony"), and category ("living", "bedroom", "kitchen", "bathroom", "hallway", "office", "utility", "balcony").
-3. DOORS & WINDOWS: Return visible doors and windows with their center (cx, cy) and span width_norm in 0..1000 coordinates.
+1. WALLS: Detect all visible exterior perimeter walls and interior room partition walls. Return each wall segment with start (x1, y1) and end (x2, y2) in 0..1000 coordinates, is_exterior (true for outer boundary walls, false for interior partition walls), and confidence (0.60 to 0.99 based on line clarity and connectivity).
+2. ROOMS: Detect each enclosed room or zone visible in the floor plan. Return its bounding box (xmin, ymin, xmax, ymax) in 0..1000 coordinates, its exact text label if written on the plan (or accurate room name like "Bedroom", "Bathroom", "Kitchen", "Living Room", "Hallway", "Balcony"), category ("living", "bedroom", "kitchen", "bathroom", "hallway", "office", "utility", "balcony"), and confidence (0.60 to 0.99).
+3. DOORS & WINDOWS: Carefully locate actual door swing arcs / doorway gaps on interior partition walls (plus main entrance door) and window symbols on exterior walls. Return kind ("door" or "window"), exact center (cx, cy) on the wall line, span width_norm in 0..1000 coordinates, and confidence (0.60 to 0.99; use <0.85 if the doorway symbol is faint or ambiguous). Never place interior room doors on exterior bedroom/bathroom walls.
 4. FURNITURE & FIXTURES (STRICT GROUNDING): ONLY return furniture or plumbing fixtures that are ACTUALLY DRAWN in this floor-plan image (such as a drawn bed, sofa, dining table, toilet, bathtub, sink, kitchen stove/counter, desk, or wardrobe).
    - If a room has NO furniture drawn inside it on the image, do NOT invent any furniture for that room!
-   - For each drawn object visible in the image, return its exact bounding box (xmin, ymin, xmax, ymax) in 0..1000 coordinates, its kind ("bed", "nightstand", "wardrobe", "sofa", "coffee_table", "tv_stand", "dining_table", "kitchen_counter", "fridge", "bathtub", "toilet", "sink_vanity", "shower", "desk"), and orientation rotation_deg (0, 90, 180, or 270).
+   - For each drawn object visible in the image, return its exact bounding box (xmin, ymin, xmax, ymax) in 0..1000 coordinates, its kind ("bed", "nightstand", "wardrobe", "sofa", "coffee_table", "tv_stand", "dining_table", "kitchen_counter", "fridge", "bathtub", "toilet", "sink_vanity", "shower", "desk"), orientation rotation_deg (0, 90, 180, or 270), and confidence (0.60 to 0.99).
 5. SCALE: Read any dimension numbers printed on the plan to estimate total_width_meters of the floor plan (default to 11.0 if no numbers are printed).`;
 
     const response = await ai.models.generateContent({
@@ -115,6 +115,7 @@ STRICT ACCURACY RULES:
                   x2: { type: Type.NUMBER },
                   y2: { type: Type.NUMBER },
                   is_exterior: { type: Type.BOOLEAN },
+                  confidence: { type: Type.NUMBER },
                 },
                 required: ['x1', 'y1', 'x2', 'y2', 'is_exterior'],
               },
@@ -130,6 +131,7 @@ STRICT ACCURACY RULES:
                   ymin: { type: Type.NUMBER },
                   xmax: { type: Type.NUMBER },
                   ymax: { type: Type.NUMBER },
+                  confidence: { type: Type.NUMBER },
                 },
                 required: ['name', 'category', 'xmin', 'ymin', 'xmax', 'ymax'],
               },
@@ -143,6 +145,7 @@ STRICT ACCURACY RULES:
                   cx: { type: Type.NUMBER },
                   cy: { type: Type.NUMBER },
                   width_norm: { type: Type.NUMBER },
+                  confidence: { type: Type.NUMBER },
                 },
                 required: ['kind', 'cx', 'cy', 'width_norm'],
               },
@@ -159,6 +162,7 @@ STRICT ACCURACY RULES:
                   xmax: { type: Type.NUMBER },
                   ymax: { type: Type.NUMBER },
                   rotation_deg: { type: Type.NUMBER },
+                  confidence: { type: Type.NUMBER },
                 },
                 required: ['kind', 'label', 'xmin', 'ymin', 'xmax', 'ymax'],
               },

@@ -37,7 +37,7 @@ export type WorkflowStepId =
 
 export type EditorToolMode = 'select' | 'add_wall' | 'add_door' | 'add_window';
 
-export type OverlayColorMode = 'standard' | 'confidence' | 'provenance';
+export type OverlayColorMode = 'confidence' | 'diagnostics' | 'standard';
 
 export type FurnitureCategory =
   | 'bed'
@@ -102,6 +102,22 @@ export interface FurnitureElement {
   provenance: EpistemicProvenance;
   confidence_status?: ConfidenceStatus;
   status_reason?: string;
+  /** Original axis-aligned bounding box in source image pixel coordinates */
+  detected_bbox_px?: {
+    xmin: number;
+    ymin: number;
+    xmax: number;
+    ymax: number;
+  };
+  /** Original detected center in source image pixel coordinates before any manual adjustment */
+  detected_center_px?: Point2D;
+  /** Which detector produced this object */
+  detector_source?:
+    | 'gemini_vision'
+    | 'raster_contour_heuristic'
+    | 'blueprint_annotation'
+    | 'generated_completion'
+    | 'user_manual';
 }
 
 export interface RoomPolygon {
@@ -173,7 +189,7 @@ export interface PipelineConfig {
   include_openings_3d: boolean;
   include_furniture_3d: boolean;
   show_generated_completion: boolean;
-  material_theme: 'studio' | 'confidence_overlay' | 'provenance_overlay' | 'blueprint';
+  material_theme: 'studio' | 'confidence_overlay' | 'blueprint';
   overlay_2d_mode: OverlayColorMode;
   ablation_mode: AblationMode;
   input_mode: 'mode_a_blueprint' | 'mode_b_video_fusion';

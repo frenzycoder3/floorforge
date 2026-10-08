@@ -2,7 +2,6 @@ import React, { useRef, useState } from 'react';
 import {
   ConfidenceStatus,
   EditorToolMode,
-  EpistemicProvenance,
   FloorPlanPipelineResult,
   OverlayColorMode,
   Point2D,
@@ -20,6 +19,7 @@ import {
   PlusSquare,
   DoorClosed,
   AppWindow,
+  Move,
 } from 'lucide-react';
 
 interface BlueprintCanvas2DProps {
@@ -32,6 +32,10 @@ interface BlueprintCanvas2DProps {
   overlayColorMode: OverlayColorMode;
   onChangeOverlayColorMode: (mode: OverlayColorMode) => void;
   onMoveWallEndpoint: (wallId: string, endpoint: 'start' | 'end', newPt: Point2D) => void;
+  onMoveWallSegment: (wallId: string, delta: Point2D) => void;
+  onMoveRoomVertex: (roomId: string, vertexIndex: number, newPt: Point2D) => void;
+  onMoveFurniture: (furnitureId: string, newCenter: Point2D) => void;
+  onSlideOpening: (openingId: string, pointerPt: Point2D) => void;
   onAddMissingWall: (start: Point2D, end: Point2D) => void;
   onAddMissingOpeningAtPoint: (kind: 'door' | 'window', pt: Point2D) => void;
   canUndo: boolean;
@@ -58,12 +62,6 @@ function getStatusColor(status?: ConfidenceStatus): string {
   return '#10B981'; // Green
 }
 
-function getProvenanceColor(prov?: EpistemicProvenance): string {
-  if (prov === 'user_corrected') return '#A855F7'; // Violet: User-Corrected
-  if (prov === 'generated_completion') return '#F59E0B'; // Amber: Inferred
-  return '#38BDF8'; // Cyan: AI-Detected
-}
-
 export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
   imageDataUrl,
   pipelineResult,
@@ -74,6 +72,10 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
   overlayColorMode,
   onChangeOverlayColorMode,
   onMoveWallEndpoint,
+  onMoveWallSegment,
+  onMoveRoomVertex,
+  onMoveFurniture,
+  onSlideOpening,
   onAddMissingWall,
   onAddMissingOpeningAtPoint,
   canUndo,
@@ -103,6 +105,17 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
     wallId: string;
     endpoint: 'start' | 'end';
   } | null>(null);
+  const [draggingWallSegment, setDraggingWallSegment] = useState<{
+    wallId: string;
+    lastPt: Point2D;
+  } | null>(null);
+  const [draggingRoomVertex, setDraggingRoomVertex] = useState<{
+    roomId: string;
+    vertexIndex: number;
+  } | null>(null);
+  const [draggingFurnitureId, setDraggingFurnitureId] = useState<string | null>(null);
+  const [draggingOpeningId, setDraggingOpeningId] = useState<string | null>(null);
+
   const [newWallStart, setNewWallStart] = useState<Point2D | null>(null);
   const [hoverPoint, setHoverPoint] = useState<Point2D | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -116,27 +129,52 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
     rooms,
   } = pipelineResult;
 
+  /**
+   * Exact inverse screen-to-SVG matrix transform accounting for scaling, aspect ratio, and offsets.
+   */
   const clientToBlueprintCoords = (clientX: number, clientY: number): Point2D => {
     const svg = svgRef.current;
     if (!svg) return { x: 0, y: 0 };
+
+    const ctm = svg.getScreenCTM();
+    if (ctm) {
+      const pt = svg.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      const transformed = pt.matrixTransform(ctm.inverse());
+      return {
+        x: Math.round(Math.max(8, Math.min(width - 8, transformed.x))),
+        y: Math.round(Math.max(8, Math.min(height - 8, transformed.y))),
+      };
+    }
+
     const rect = svg.getBoundingClientRect();
-    const x = Math.max(12, Math.min(width - 12, ((clientX - rect.left) / rect.width) * width));
-    const y = Math.max(12, Math.min(height - 12, ((clientY - rect.top) / rect.height) * height));
+    const x = Math.max(8, Math.min(width - 8, ((clientX - rect.left) / rect.width) * width));
+    const y = Math.max(8, Math.min(height - 8, ((clientY - rect.top) / rect.height) * height));
     return { x: Math.round(x), y: Math.round(y) };
   };
 
-  // Snap a point to existing wall endpoints if within 14px
+  // Snap a point to existing wall endpoints if within 12px
   const snapToExistingVertices = (pt: Point2D, ignoreWallId?: string): Point2D => {
     for (const w of walls) {
       if (w.id === ignoreWallId) continue;
-      if (Math.hypot(pt.x - w.start.x, pt.y - w.start.y) <= 14) {
+      if (Math.hypot(pt.x - w.start.x, pt.y - w.start.y) <= 12) {
         return { x: w.start.x, y: w.start.y };
       }
-      if (Math.hypot(pt.x - w.end.x, pt.y - w.end.y) <= 14) {
+      if (Math.hypot(pt.x - w.end.x, pt.y - w.end.y) <= 12) {
         return { x: w.end.x, y: w.end.y };
       }
     }
     return pt;
+  };
+
+  const stopAllDragging = () => {
+    setDraggingRulerHandle(null);
+    setDraggingWallVertex(null);
+    setDraggingWallSegment(null);
+    setDraggingRoomVertex(null);
+    setDraggingFurnitureId(null);
+    setDraggingOpeningId(null);
   };
 
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -154,11 +192,49 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
     if (draggingWallVertex) {
       const snapped = snapToExistingVertices(rawPt, draggingWallVertex.wallId);
       onMoveWallEndpoint(draggingWallVertex.wallId, draggingWallVertex.endpoint, snapped);
+      return;
+    }
+
+    if (draggingWallSegment) {
+      const dx = rawPt.x - draggingWallSegment.lastPt.x;
+      const dy = rawPt.y - draggingWallSegment.lastPt.y;
+      if (Math.abs(dx) >= 2 || Math.abs(dy) >= 2) {
+        onMoveWallSegment(draggingWallSegment.wallId, { x: dx, y: dy });
+        setDraggingWallSegment({
+          wallId: draggingWallSegment.wallId,
+          lastPt: rawPt,
+        });
+      }
+      return;
+    }
+
+    if (draggingRoomVertex) {
+      onMoveRoomVertex(draggingRoomVertex.roomId, draggingRoomVertex.vertexIndex, rawPt);
+      return;
+    }
+
+    if (draggingFurnitureId) {
+      onMoveFurniture(draggingFurnitureId, rawPt);
+      return;
+    }
+
+    if (draggingOpeningId) {
+      onSlideOpening(draggingOpeningId, rawPt);
+      return;
     }
   };
 
   const handleCanvasClick = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (draggingWallVertex || draggingRulerHandle !== null) return;
+    if (
+      draggingWallVertex ||
+      draggingWallSegment ||
+      draggingRoomVertex ||
+      draggingFurnitureId ||
+      draggingOpeningId ||
+      draggingRulerHandle !== null
+    ) {
+      return;
+    }
     const pt = snapToExistingVertices(clientToBlueprintCoords(e.clientX, e.clientY));
 
     if (editorTool === 'add_wall') {
@@ -202,9 +278,9 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
         }
       }}
     >
-      {/* Row 1: Overlay Mode Switcher & Undo/Redo Controls */}
+      {/* Row 1: Overlay Mode Switcher & Interactive Border / Object Editing Tools */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-[#12161F] border-b border-[#222938]">
-        {/* Overlay Color Mode Selector */}
+        {/* Overlay Color Mode Selector (Provenance View Removed) */}
         <div className="flex items-center gap-1 bg-[#0B0D11] p-1 rounded-md border border-[#222938]">
           <button
             type="button"
@@ -220,15 +296,15 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onChangeOverlayColorMode('provenance')}
+            onClick={() => onChangeOverlayColorMode('diagnostics')}
             className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-              overlayColorMode === 'provenance'
-                ? 'bg-[#A855F7]/20 text-[#C084FC] border border-[#A855F7]/40'
+              overlayColorMode === 'diagnostics'
+                ? 'bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/40'
                 : 'text-[#94A3B8] hover:text-[#F1F5F9]'
             }`}
-            title="Distinguish AI-Detected (Cyan), User-Corrected (Purple), and Inferred (Amber) geometry"
+            title="Inspect detected furniture bounding boxes, centers, orientation vectors, and border vertices"
           >
-            Provenance View
+            Detection Boxes
           </button>
           <button
             type="button"
@@ -256,10 +332,10 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
                 ? 'bg-[#D97706] text-[#F8FAFC]'
                 : 'text-[#94A3B8] hover:text-[#F1F5F9]'
             }`}
-            title="Select & drag wall endpoints, rooms, or openings"
+            title="Select & drag wall borders, room corners, furniture objects, or doors/windows"
           >
             <MousePointer className="w-3 h-3" />
-            <span>Select / Edit</span>
+            <span>Select / Drag Borders</span>
           </button>
           <button
             type="button"
@@ -272,7 +348,7 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
                 ? 'bg-[#D97706] text-[#F8FAFC]'
                 : 'text-[#94A3B8] hover:text-[#F1F5F9]'
             }`}
-            title="Mark a missing wall by clicking start and end points on the floor plan"
+            title="Mark a missing wall border by clicking start and end points on the floor plan"
           >
             <PlusSquare className="w-3 h-3" />
             <span>+ Wall</span>
@@ -337,8 +413,8 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
           <span>
             {editorTool === 'add_wall'
               ? newWallStart
-                ? `Click second endpoint on the floor plan to finish new wall from (${newWallStart.x}, ${newWallStart.y})...`
-                : 'Click the starting point on the floor plan to draw a missing wall segment.'
+                ? `Click second endpoint on the floor plan to finish new wall border from (${newWallStart.x}, ${newWallStart.y})...`
+                : 'Click the starting point on the floor plan to draw a missing wall border.'
               : editorTool === 'add_door'
               ? 'Click anywhere along an existing wall to insert a missing door.'
               : 'Click anywhere along an existing wall to insert a missing window.'}
@@ -403,14 +479,8 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
               editorTool !== 'select' ? 'cursor-crosshair' : ''
             }`}
             onPointerMove={handlePointerMove}
-            onPointerUp={() => {
-              setDraggingRulerHandle(null);
-              setDraggingWallVertex(null);
-            }}
-            onPointerLeave={() => {
-              setDraggingRulerHandle(null);
-              setDraggingWallVertex(null);
-            }}
+            onPointerUp={stopAllDragging}
+            onPointerLeave={stopAllDragging}
             onClick={handleCanvasClick}
           >
             {imageDataUrl && (
@@ -425,7 +495,7 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
               />
             )}
 
-            {/* Room Polygons */}
+            {/* Room Polygons & Draggable Room Border Vertices */}
             {rooms.map((room) => {
               const isSelected =
                 selectedElement?.kind === 'room' && selectedElement.id === room.id;
@@ -438,80 +508,106 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
               const strokeColor =
                 overlayColorMode === 'confidence'
                   ? getStatusColor(room.confidence_status)
-                  : overlayColorMode === 'provenance'
-                  ? getProvenanceColor(room.provenance)
                   : '#38BDF8';
 
               const fillColor = isSelected
-                ? 'rgba(217, 119, 6, 0.26)'
+                ? 'rgba(217, 119, 6, 0.24)'
                 : overlayColorMode === 'confidence'
                 ? room.confidence_status === 'invalid'
-                  ? 'rgba(239, 68, 68, 0.16)'
+                  ? 'rgba(239, 68, 68, 0.15)'
                   : room.confidence_status === 'uncertain'
-                  ? 'rgba(245, 158, 11, 0.16)'
-                  : 'rgba(16, 185, 129, 0.12)'
-                : 'rgba(56, 189, 248, 0.12)';
+                  ? 'rgba(245, 158, 11, 0.15)'
+                  : 'rgba(16, 185, 129, 0.11)'
+                : 'rgba(56, 189, 248, 0.11)';
 
               return (
-                <g
-                  key={room.id}
-                  onClick={(e) => {
-                    if (editorTool !== 'select') return;
-                    e.stopPropagation();
-                    onSelectElement(isSelected ? null : { kind: 'room', id: room.id });
-                  }}
-                  className="cursor-pointer"
-                >
+                <g key={room.id}>
                   <polygon
                     points={pointsAttr}
                     fill={fillColor}
                     stroke={isSelected ? '#F8FAFC' : strokeColor}
                     strokeWidth={isSelected ? 3 : 1.75}
                     strokeDasharray={
-                      room.confidence_status === 'uncertain' ||
-                      room.provenance === 'generated_completion'
-                        ? '6,4'
-                        : undefined
+                      room.confidence_status === 'uncertain' ? '6,4' : undefined
                     }
+                    className="cursor-pointer"
+                    onClick={(e) => {
+                      if (editorTool !== 'select') return;
+                      e.stopPropagation();
+                      onSelectElement(isSelected ? null : { kind: 'room', id: room.id });
+                    }}
                   />
-                  <rect
-                    x={cx - 70}
-                    y={cy - 20}
-                    width={140}
-                    height={40}
-                    rx={4}
-                    fill="rgba(11, 13, 17, 0.88)"
-                    stroke={isSelected ? '#F8FAFC' : strokeColor}
-                    strokeWidth={1.2}
-                  />
-                  <text
-                    x={cx}
-                    y={cy - 4}
-                    textAnchor="middle"
-                    fill="#F8FAFC"
-                    fontSize="10.5"
-                    fontFamily="Plus Jakarta Sans, sans-serif"
-                    fontWeight="600"
+                  <g
+                    className="cursor-pointer"
+                    onClick={(e) => {
+                      if (editorTool !== 'select') return;
+                      e.stopPropagation();
+                      onSelectElement(isSelected ? null : { kind: 'room', id: room.id });
+                    }}
                   >
-                    {room.name}
-                  </text>
-                  <text
-                    x={cx}
-                    y={cy + 11}
-                    textAnchor="middle"
-                    fill={strokeColor}
-                    fontSize="10"
-                    fontFamily="JetBrains Mono, monospace"
-                    fontWeight="600"
-                  >
-                    {room.area_m2.toFixed(1)} m² · {Math.round(room.confidence * 100)}%
-                  </text>
-                  <title>{`${room.name} (${room.id}): ${room.status_reason || ''}`}</title>
+                    <rect
+                      x={cx - 72}
+                      y={cy - 20}
+                      width={144}
+                      height={40}
+                      rx={4}
+                      fill="rgba(11, 13, 17, 0.88)"
+                      stroke={isSelected ? '#F8FAFC' : strokeColor}
+                      strokeWidth={1.2}
+                    />
+                    <text
+                      x={cx}
+                      y={cy - 4}
+                      textAnchor="middle"
+                      fill="#F8FAFC"
+                      fontSize="10.5"
+                      fontFamily="Plus Jakarta Sans, sans-serif"
+                      fontWeight="600"
+                    >
+                      {room.name}
+                    </text>
+                    <text
+                      x={cx}
+                      y={cy + 11}
+                      textAnchor="middle"
+                      fill={strokeColor}
+                      fontSize="10"
+                      fontFamily="JetBrains Mono, monospace"
+                      fontWeight="600"
+                    >
+                      {room.area_m2.toFixed(1)} m² · {Math.round(room.confidence * 100)}%
+                    </text>
+                  </g>
+
+                  {/* Draggable Room Border Vertices when Room is Selected */}
+                  {isSelected &&
+                    room.polygon.map((pt, vIdx) => (
+                      <rect
+                        key={`${room.id}-v-${vIdx}`}
+                        x={pt.x - 6}
+                        y={pt.y - 6}
+                        width={12}
+                        height={12}
+                        rx={2}
+                        fill="#F59E0B"
+                        stroke="#0B0D11"
+                        strokeWidth={2}
+                        className="cursor-move"
+                        onPointerDown={(e) => {
+                          if (editorTool !== 'select') return;
+                          e.stopPropagation();
+                          setDraggingRoomVertex({ roomId: room.id, vertexIndex: vIdx });
+                        }}
+                      >
+                        <title>{`Drag to adjust ${room.name} corner border (${pt.x}, ${pt.y})`}</title>
+                      </rect>
+                    ))}
+                  <title>{`${room.name} (${room.id}): Click to select & drag room border corners`}</title>
                 </g>
               );
             })}
 
-            {/* 2D Furniture & Fixtures */}
+            {/* 2D Furniture & Fixtures (Interactive Click + Drag to Reposition + Detection BBox Overlay) */}
             {showFurniture &&
               furniture.map((item) => {
                 const isSelected =
@@ -519,83 +615,115 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
                 const strokeColor =
                   overlayColorMode === 'confidence'
                     ? getStatusColor(item.confidence_status)
-                    : getProvenanceColor(item.provenance);
+                    : '#38BDF8';
 
                 return (
-                  <g
-                    key={item.id}
-                    transform={`translate(${item.center_px.x}, ${item.center_px.y}) rotate(${item.rotation_deg})`}
-                    onClick={(e) => {
-                      if (editorTool !== 'select') return;
-                      e.stopPropagation();
-                      onSelectElement(
-                        isSelected ? null : { kind: 'furniture', id: item.id }
-                      );
-                    }}
-                    className="cursor-pointer"
-                  >
-                    <rect
-                      x={-item.width_px / 2}
-                      y={-item.depth_px / 2}
-                      width={item.width_px}
-                      height={item.depth_px}
-                      rx={4}
-                      fill="rgba(15, 23, 42, 0.55)"
-                      stroke={isSelected ? '#F8FAFC' : strokeColor}
-                      strokeWidth={isSelected ? 2.5 : 1.8}
-                      strokeDasharray={
-                        item.provenance === 'generated_completion' ? '4,3' : undefined
-                      }
-                    />
-                    <text
-                      x={0}
-                      y={3}
-                      textAnchor="middle"
-                      fill="#F8FAFC"
-                      fontSize="8.5"
-                      fontFamily="JetBrains Mono, monospace"
-                      fontWeight="600"
+                  <g key={item.id}>
+                    {/* Raw Detected Bounding Box in Diagnostics Mode */}
+                    {overlayColorMode === 'diagnostics' && item.detected_bbox_px && (
+                      <rect
+                        x={item.detected_bbox_px.xmin}
+                        y={item.detected_bbox_px.ymin}
+                        width={item.detected_bbox_px.xmax - item.detected_bbox_px.xmin}
+                        height={item.detected_bbox_px.ymax - item.detected_bbox_px.ymin}
+                        fill="none"
+                        stroke="#F59E0B"
+                        strokeWidth={1.2}
+                        strokeDasharray="3,3"
+                        className="pointer-events-none"
+                      />
+                    )}
+
+                    <g
+                      transform={`translate(${item.center_px.x}, ${item.center_px.y}) rotate(${item.rotation_deg})`}
+                      onPointerDown={(e) => {
+                        if (editorTool !== 'select') return;
+                        e.stopPropagation();
+                        onSelectElement({ kind: 'furniture', id: item.id });
+                        setDraggingFurnitureId(item.id);
+                      }}
+                      className="cursor-move"
                     >
-                      {item.kind.replace('_', ' ').toUpperCase()}
-                    </text>
-                    <title>{`${item.label}: ${item.status_reason || ''}`}</title>
+                      <rect
+                        x={-item.width_px / 2}
+                        y={-item.depth_px / 2}
+                        width={item.width_px}
+                        height={item.depth_px}
+                        rx={4}
+                        fill={
+                          isSelected
+                            ? 'rgba(217, 119, 6, 0.35)'
+                            : 'rgba(15, 23, 42, 0.62)'
+                        }
+                        stroke={isSelected ? '#F8FAFC' : strokeColor}
+                        strokeWidth={isSelected ? 2.6 : 1.8}
+                        strokeDasharray={
+                          item.provenance === 'generated_completion' ? '4,3' : undefined
+                        }
+                      />
+                      {/* Front Orientation Indicator Line (shows which way the 3D model faces) */}
+                      <line
+                        x1={0}
+                        y1={0}
+                        x2={0}
+                        y2={item.depth_px * 0.42}
+                        stroke={isSelected ? '#F59E0B' : strokeColor}
+                        strokeWidth={2}
+                      />
+                      <circle
+                        cx={0}
+                        cy={0}
+                        r={3}
+                        fill={isSelected ? '#F8FAFC' : strokeColor}
+                      />
+                      <text
+                        x={0}
+                        y={-3}
+                        textAnchor="middle"
+                        fill="#F8FAFC"
+                        fontSize="8.5"
+                        fontFamily="JetBrains Mono, monospace"
+                        fontWeight="600"
+                      >
+                        {item.kind.replace('_', ' ').toUpperCase()}
+                      </text>
+                      <title>{`${item.label} (${item.center_px.x}, ${item.center_px.y}) — Drag to reposition`}</title>
+                    </g>
                   </g>
                 );
               })}
 
-            {/* Structural & Partition Walls (Interactive Click + Endpoint Drag) */}
+            {/* Structural & Partition Wall Borders (Select + Drag Entire Border + Drag Endpoints) */}
             {walls.map((wall) => {
               const isSelected =
                 selectedElement?.kind === 'wall' && selectedElement.id === wall.id;
               const strokeColor =
                 overlayColorMode === 'confidence'
                   ? getStatusColor(wall.confidence_status)
-                  : overlayColorMode === 'provenance'
-                  ? getProvenanceColor(wall.provenance)
                   : wall.is_exterior
                   ? '#38BDF8'
                   : '#CBD5E1';
 
-              const showHandles =
-                isSelected ||
-                wall.confidence_status === 'invalid' ||
-                wall.confidence_status === 'uncertain';
+              const midX = Math.round((wall.start.x + wall.end.x) / 2);
+              const midY = Math.round((wall.start.y + wall.end.y) / 2);
 
               return (
                 <g key={wall.id}>
-                  {/* Invisible wider hit line for easy clicking */}
+                  {/* Wide hit line for selecting OR dragging the entire wall border segment */}
                   <line
                     x1={wall.start.x}
                     y1={wall.start.y}
                     x2={wall.end.x}
                     y2={wall.end.y}
                     stroke="transparent"
-                    strokeWidth={22}
-                    className="cursor-pointer"
-                    onClick={(e) => {
+                    strokeWidth={24}
+                    className="cursor-move"
+                    onPointerDown={(e) => {
                       if (editorTool !== 'select') return;
                       e.stopPropagation();
+                      const pt = clientToBlueprintCoords(e.clientX, e.clientY);
                       onSelectElement({ kind: 'wall', id: wall.id });
+                      setDraggingWallSegment({ wallId: wall.id, lastPt: pt });
                     }}
                   />
                   <line
@@ -609,37 +737,65 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
                     className="pointer-events-none"
                   />
 
-                  {/* Draggable Wall Endpoints when selected or uncertain/invalid */}
-                  {showHandles &&
-                    (['start', 'end'] as const).map((ep) => {
-                      const pt = wall[ep];
-                      return (
-                        <circle
-                          key={`${wall.id}-${ep}`}
-                          cx={pt.x}
-                          cy={pt.y}
-                          r={isSelected ? 8 : 6}
-                          fill={strokeColor}
-                          stroke="#0B0D11"
-                          strokeWidth={2}
-                          className="cursor-grab active:cursor-grabbing"
-                          onPointerDown={(e) => {
-                            if (editorTool !== 'select') return;
-                            e.stopPropagation();
-                            onSelectElement({ kind: 'wall', id: wall.id });
-                            setDraggingWallVertex({ wallId: wall.id, endpoint: ep });
-                          }}
-                        >
-                          <title>{`Drag to adjust ${wall.id} ${ep} vertex (${pt.x}, ${pt.y})`}</title>
-                        </circle>
-                      );
-                    })}
-                  <title>{`Wall ${wall.id}: ${wall.status_reason || ''} (Click to inspect or drag endpoints)`}</title>
+                  {/* Center Grip Handle when wall border is selected */}
+                  {isSelected && (
+                    <g
+                      className="cursor-move"
+                      onPointerDown={(e) => {
+                        if (editorTool !== 'select') return;
+                        e.stopPropagation();
+                        const pt = clientToBlueprintCoords(e.clientX, e.clientY);
+                        setDraggingWallSegment({ wallId: wall.id, lastPt: pt });
+                      }}
+                    >
+                      <rect
+                        x={midX - 9}
+                        y={midY - 9}
+                        width={18}
+                        height={18}
+                        rx={4}
+                        fill="#D97706"
+                        stroke="#F8FAFC"
+                        strokeWidth={1.8}
+                      />
+                      <title>{`Drag to slide entire wall border ${wall.id}`}</title>
+                    </g>
+                  )}
+
+                  {/* Draggable Wall Endpoints (Always interactive so any border vertex can be dragged) */}
+                  {(['start', 'end'] as const).map((ep) => {
+                    const pt = wall[ep];
+                    const isEmphasized =
+                      isSelected ||
+                      wall.confidence_status === 'invalid' ||
+                      wall.confidence_status === 'uncertain';
+                    return (
+                      <circle
+                        key={`${wall.id}-${ep}`}
+                        cx={pt.x}
+                        cy={pt.y}
+                        r={isSelected ? 8 : isEmphasized ? 6.5 : 4.5}
+                        fill={isSelected ? '#F59E0B' : strokeColor}
+                        stroke="#0B0D11"
+                        strokeWidth={1.8}
+                        className="cursor-grab active:cursor-grabbing"
+                        onPointerDown={(e) => {
+                          if (editorTool !== 'select') return;
+                          e.stopPropagation();
+                          onSelectElement({ kind: 'wall', id: wall.id });
+                          setDraggingWallVertex({ wallId: wall.id, endpoint: ep });
+                        }}
+                      >
+                        <title>{`Drag to move ${wall.id} ${ep} border vertex (${pt.x}, ${pt.y})`}</title>
+                      </circle>
+                    );
+                  })}
+                  <title>{`Wall Border ${wall.id}: Drag line to move border or drag circular endpoints`}</title>
                 </g>
               );
             })}
 
-            {/* Doors & Windows (Closed Doors + Confidence/Provenance Color) */}
+            {/* Doors & Windows (Closed Doors + Drag Along Wall to Reposition) */}
             {openings.map((op) => {
               const wall = walls.find((w) => w.id === op.wall_id);
               if (!wall) return null;
@@ -657,8 +813,6 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
               const color =
                 overlayColorMode === 'confidence'
                   ? getStatusColor(op.confidence_status)
-                  : overlayColorMode === 'provenance'
-                  ? getProvenanceColor(op.provenance)
                   : op.kind === 'door'
                   ? '#F59E0B'
                   : '#2DD4BF';
@@ -666,11 +820,12 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
               return (
                 <g
                   key={op.id}
-                  className="cursor-pointer"
-                  onClick={(e) => {
+                  className="cursor-grab active:cursor-grabbing"
+                  onPointerDown={(e) => {
                     if (editorTool !== 'select') return;
                     e.stopPropagation();
                     onSelectElement({ kind: 'opening', id: op.id });
+                    setDraggingOpeningId(op.id);
                   }}
                 >
                   <line
@@ -701,7 +856,7 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
                   >
                     {op.kind === 'door' ? 'D' : 'W'}
                   </text>
-                  <title>{`${op.id} (${op.kind}): ${op.status_reason || ''}`}</title>
+                  <title>{`${op.id} (${op.kind}): Drag to slide along wall`}</title>
                 </g>
               );
             })}
@@ -713,7 +868,7 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
                 y1={newWallStart.y}
                 x2={hoverPoint.x}
                 y2={hoverPoint.y}
-                stroke="#A855F7"
+                stroke="#F59E0B"
                 strokeWidth={8}
                 strokeDasharray="6,4"
               />
@@ -778,41 +933,27 @@ export const BlueprintCanvas2D: React.FC<BlueprintCanvas2DProps> = ({
 
         {/* Bottom Legend & Quick Actions */}
         <div className="absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-md bg-[#0B0D11]/90 backdrop-blur-md border border-[#222938] text-xs">
-          {overlayColorMode === 'confidence' ? (
-            <div className="flex items-center gap-3 text-[#94A3B8]">
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-xs bg-[#10B981] inline-block" />
-                <span>High Confidence</span>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-xs bg-[#F59E0B] inline-block" />
-                <span>Uncertain (Needs Review)</span>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-xs bg-[#EF4444] inline-block" />
-                <span>Disconnected / Invalid</span>
-              </span>
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 text-[#94A3B8]">
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-xs bg-[#38BDF8] inline-block" />
-                <span>AI-Detected</span>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-xs bg-[#A855F7] inline-block" />
-                <span>User-Corrected</span>
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-xs bg-[#F59E0B] inline-block" />
-                <span>Inferred</span>
-              </span>
-            </div>
-          )}
+          <div className="flex items-center gap-3 text-[#94A3B8]">
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-[#10B981] inline-block" />
+              <span>High Confidence</span>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-[#F59E0B] inline-block" />
+              <span>Uncertain (Needs Review)</span>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-[#EF4444] inline-block" />
+              <span>Disconnected / Invalid</span>
+            </span>
+            <span aria-hidden="true" className="hidden xl:inline">·</span>
+            <span className="hidden xl:flex items-center gap-1 text-[#38BDF8]">
+              <Move className="w-3 h-3" />
+              <span>Drag walls, corners, doors & objects</span>
+            </span>
+          </div>
 
           <div className="flex items-center gap-1.5">
             <button

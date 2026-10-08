@@ -5,13 +5,12 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   ConfidenceStatus,
-  EpistemicProvenance,
   FloorPlanPipelineResult,
   FurnitureMesh3D,
   PipelineConfig,
   SelectedElementRef,
 } from '../types/floorforge';
-import { RotateCcw, Layers, Compass, Download, ShieldAlert, GitBranch } from 'lucide-react';
+import { RotateCcw, Layers, Compass, Download, ShieldAlert } from 'lucide-react';
 
 export interface Viewport3DHandle {
   exportGLB: () => void;
@@ -30,12 +29,6 @@ function get3DConfidenceColor(status: ConfidenceStatus): string {
   if (status === 'invalid') return '#EF4444'; // Red
   if (status === 'uncertain') return '#F59E0B'; // Amber
   return '#10B981'; // Green
-}
-
-function get3DProvenanceColor(prov: EpistemicProvenance): string {
-  if (prov === 'user_corrected') return '#A855F7'; // Violet: User-Corrected
-  if (prov === 'generated_completion') return '#F59E0B'; // Amber: Inferred
-  return '#38BDF8'; // Cyan: AI-Detected
 }
 
 // ============================================================================
@@ -314,15 +307,6 @@ function buildFurniture3DObject(
         color: get3DConfidenceColor(item.confidence_status),
         roughness: 0.45,
         metalness: 0.1,
-      });
-    }
-    if (theme === 'provenance_overlay') {
-      return new THREE.MeshStandardMaterial({
-        color: get3DProvenanceColor(item.provenance),
-        roughness: 0.45,
-        metalness: 0.1,
-        transparent: item.provenance === 'generated_completion',
-        opacity: item.provenance === 'generated_completion' ? 0.72 : 0.95,
       });
     }
     return new THREE.MeshPhysicalMaterial({
@@ -1387,16 +1371,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
                   : '#064E3B',
               roughness: 0.6,
             });
-          } else if (theme === 'provenance_overlay') {
-            floorMat = new THREE.MeshStandardMaterial({
-              color:
-                slab.provenance === 'user_corrected'
-                  ? '#581C87'
-                  : slab.provenance === 'generated_completion'
-                  ? '#78350F'
-                  : '#0C4A6E',
-              roughness: 0.6,
-            });
           } else if (theme === 'blueprint') {
             floorMat = new THREE.MeshStandardMaterial({ color: '#0F172A', roughness: 0.8 });
           } else {
@@ -1457,9 +1431,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
         if (length < 0.02) continue;
 
         const effectiveMaxY = cutawayMode
-          ? seg.is_exterior
-            ? Math.min(config.wall_height_m, 1.15)
-            : Math.min(config.wall_height_m, 2.05)
+          ? Math.min(config.wall_height_m, 2.32)
           : config.wall_height_m;
 
         if (seg.bottom_y_m >= effectiveMaxY) continue;
@@ -1474,8 +1446,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
           wallColor = '#F59E0B';
         } else if (theme === 'confidence_overlay') {
           wallColor = get3DConfidenceColor(seg.confidence_status);
-        } else if (theme === 'provenance_overlay') {
-          wallColor = get3DProvenanceColor(seg.provenance);
         } else if (theme === 'blueprint') {
           wallColor = '#1E293B';
         }
@@ -1484,15 +1454,8 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
           color: wallColor,
           roughness: 0.72,
           metalness: 0.03,
-          transparent:
-            theme === 'blueprint' ||
-            (theme === 'provenance_overlay' && seg.provenance === 'generated_completion'),
-          opacity:
-            theme === 'blueprint'
-              ? 0.75
-              : theme === 'provenance_overlay' && seg.provenance === 'generated_completion'
-              ? 0.68
-              : 1.0,
+          transparent: theme === 'blueprint',
+          opacity: theme === 'blueprint' ? 0.75 : 1.0,
         });
 
         const boxGeo = new THREE.BoxGeometry(length, effectiveHeight, seg.thickness_m);
@@ -1536,8 +1499,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
           metalness: 0.9,
         });
 
+        const effectiveWallTop = cutawayMode
+          ? Math.min(config.wall_height_m, 2.32)
+          : config.wall_height_m;
+
         for (const op of model3d.openings) {
-          const maxOpH = cutawayMode ? Math.min(op.height_m, 1.65) : op.height_m;
+          const maxOpH = Math.min(op.height_m, Math.max(0.4, effectiveWallTop - op.sill_y_m - 0.12));
           if (maxOpH <= 0.2) continue;
 
           const isSelected =
@@ -1553,8 +1520,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
               ? '#F59E0B'
               : theme === 'confidence_overlay'
               ? get3DConfidenceColor(op.confidence_status)
-              : theme === 'provenance_overlay'
-              ? get3DProvenanceColor(op.provenance)
               : '#BAE6FD';
 
             const glassMat = new THREE.MeshPhysicalMaterial({
@@ -1581,14 +1546,14 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
             // Flowing Pleated Curtains & Brass Curtain Rod (Studio mode)
             if (theme === 'studio') {
               const rod = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.012, 0.012, op.width_m * 1.26, 12),
+                new THREE.CylinderGeometry(0.012, 0.012, op.width_m * 1.22, 12),
                 handleMat
               );
               rod.rotation.z = Math.PI / 2;
-              rod.position.set(0, maxOpH / 2 + 0.06, op.thickness_m * 0.55);
+              rod.position.set(0, maxOpH / 2 + 0.04, op.thickness_m * 0.55);
               group.add(rod);
 
-              const drapeH = maxOpH + op.sill_y_m * 0.75;
+              const drapeH = maxOpH + op.sill_y_m * 0.72;
               const drapeMat = new THREE.MeshStandardMaterial({
                 color: '#C27D56',
                 roughness: 0.88,
@@ -1604,12 +1569,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
               for (const side of [-1, 1]) {
                 for (let p = 0; p < 3; p++) {
                   const pleat = new THREE.Mesh(
-                    new THREE.CylinderGeometry(0.045, 0.055, drapeH, 12),
+                    new THREE.CylinderGeometry(0.042, 0.05, drapeH, 12),
                     drapeMat
                   );
                   pleat.position.set(
-                    side * (op.width_m * 0.44 + p * 0.065),
-                    -op.sill_y_m * 0.35,
+                    side * (op.width_m * 0.42 + p * 0.055),
+                    -op.sill_y_m * 0.34,
                     op.thickness_m * 0.55
                   );
                   pleat.castShadow = true;
@@ -1623,7 +1588,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
                 );
                 sheer.position.set(
                   side * op.width_m * 0.28,
-                  -op.sill_y_m * 0.35,
+                  -op.sill_y_m * 0.34,
                   op.thickness_m * 0.48
                 );
                 group.add(sheer);
@@ -1635,9 +1600,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
               ? '#F59E0B'
               : theme === 'confidence_overlay'
               ? get3DConfidenceColor(op.confidence_status)
-              : theme === 'provenance_overlay'
-              ? get3DProvenanceColor(op.provenance)
               : '#6E3F1D';
+
+            const panelColor =
+              isSelected || theme === 'confidence_overlay' ? doorColor : '#5C3419';
 
             const doorMat = new THREE.MeshPhysicalMaterial({
               color: doorColor,
@@ -1658,12 +1624,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
             // Molded recessed door panels
             const upperPanel = new THREE.Mesh(
               new THREE.BoxGeometry(leafWidth * 0.72, maxOpH * 0.38, 0.064),
-              new THREE.MeshStandardMaterial({ color: '#5C3419', roughness: 0.48 })
+              new THREE.MeshStandardMaterial({ color: panelColor, roughness: 0.48 })
             );
             upperPanel.position.set(0, maxOpH * 0.2, 0);
             const lowerPanel = new THREE.Mesh(
               new THREE.BoxGeometry(leafWidth * 0.72, maxOpH * 0.34, 0.064),
-              new THREE.MeshStandardMaterial({ color: '#5C3419', roughness: 0.48 })
+              new THREE.MeshStandardMaterial({ color: panelColor, roughness: 0.48 })
             );
             lowerPanel.position.set(0, -maxOpH * 0.22, 0);
             group.add(upperPanel, lowerPanel);
@@ -1674,7 +1640,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
             handleMesh.position.set(leafWidth * 0.34, -maxOpH * 0.04, 0);
             group.add(handleMesh);
 
-            // Left & Right Door Jambs
+            // Left, Right & Top Door Jambs flush inside wall opening
             const leftJamb = new THREE.Mesh(
               new THREE.BoxGeometry(0.045, maxOpH, op.thickness_m * 1.08),
               frameMat
@@ -1685,7 +1651,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
               frameMat
             );
             rightJamb.position.x = op.width_m / 2 - 0.022;
-            group.add(leftJamb, rightJamb);
+            const headJamb = new THREE.Mesh(
+              new THREE.BoxGeometry(op.width_m, 0.045, op.thickness_m * 1.08),
+              frameMat
+            );
+            headJamb.position.y = maxOpH / 2 - 0.02;
+            group.add(leftJamb, rightJamb, headJamb);
           }
 
           exportGroup.add(group);
@@ -1716,7 +1687,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
           </div>
 
           <div className="flex items-center gap-1.5">
-            {/* 3D Material / Confidence / Provenance Switcher */}
+            {/* 3D Material / Confidence Switcher (Provenance View Removed) */}
             <div className="flex items-center gap-1 bg-[#0B0D11] p-1 rounded-md border border-[#222938]">
               <button
                 type="button"
@@ -1741,19 +1712,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
               >
                 <ShieldAlert className="w-3 h-3" />
                 <span>3D Confidence</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onChangeMaterialTheme('provenance_overlay')}
-                className={`px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1 whitespace-nowrap ${
-                  config.material_theme === 'provenance_overlay'
-                    ? 'bg-[#A855F7]/20 text-[#C084FC] border border-[#A855F7]/40'
-                    : 'text-[#64748B] hover:text-[#94A3B8]'
-                }`}
-                title="3D Provenance: AI-Detected (Cyan), User-Corrected (Violet), Inferred (Amber)"
-              >
-                <GitBranch className="w-3 h-3" />
-                <span>3D Provenance</span>
               </button>
             </div>
 
@@ -1783,7 +1741,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
             </div>
           )}
 
-          {/* Floating Legend when 3D Confidence or Provenance theme is active */}
+          {/* Floating Legend when 3D Confidence theme is active */}
           {config.material_theme === 'confidence_overlay' && (
             <div className="absolute top-3 right-4 z-10 px-3 py-2 rounded-md bg-[#0B0D11]/90 backdrop-blur-md border border-[#222938] text-xs space-y-1 pointer-events-none">
               <div className="font-semibold text-[#F8FAFC]">3D AI Confidence Overlay</div>
@@ -1799,26 +1757,6 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(
                 <span className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-xs bg-[#EF4444] inline-block" />
                   <span>Invalid ({provenance_report.invalid_count})</span>
-                </span>
-              </div>
-            </div>
-          )}
-
-          {config.material_theme === 'provenance_overlay' && (
-            <div className="absolute top-3 right-4 z-10 px-3 py-2 rounded-md bg-[#0B0D11]/90 backdrop-blur-md border border-[#222938] text-xs space-y-1 pointer-events-none">
-              <div className="font-semibold text-[#F8FAFC]">3D Reconstruction Provenance</div>
-              <div className="flex items-center gap-3 text-[#94A3B8]">
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-xs bg-[#38BDF8] inline-block" />
-                  <span>AI-Detected ({provenance_report.ai_detected_count})</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-xs bg-[#A855F7] inline-block" />
-                  <span>User-Corrected ({provenance_report.user_corrected_count})</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-xs bg-[#F59E0B] inline-block" />
-                  <span>Inferred ({provenance_report.inferred_completion_count})</span>
                 </span>
               </div>
             </div>

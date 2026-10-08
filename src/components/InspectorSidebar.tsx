@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   ConfidenceStatus,
   EditorToolMode,
   FloorPlanPipelineResult,
+  FurnitureCategory,
   OverlayColorMode,
   PipelineConfig,
   RoomCategory,
@@ -13,11 +14,10 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
-  Code2,
   DoorClosed,
-  GitBranch,
   PlusSquare,
   Redo2,
+  RotateCw,
   Ruler,
   ShieldAlert,
   Sliders,
@@ -25,6 +25,8 @@ import {
   Undo2,
   Wrench,
   AppWindow,
+  Download,
+  Cpu,
 } from 'lucide-react';
 
 export type InspectorTabId = 'correct' | 'validate' | 'report' | 'rooms';
@@ -59,6 +61,7 @@ interface InspectorSidebarProps {
   onUpdateOpeningGeometry: (
     openingId: string,
     updates: {
+      wall_id?: string;
       position_t?: number;
       width_px?: number;
       kind?: 'door' | 'window';
@@ -68,6 +71,18 @@ interface InspectorSidebarProps {
     roomId: string,
     updates: { name?: string; category?: RoomCategory }
   ) => void;
+  onUpdateFurnitureGeometry: (
+    furnitureId: string,
+    updates: {
+      kind?: FurnitureCategory;
+      label?: string;
+      center_px?: { x: number; y: number };
+      width_px?: number;
+      depth_px?: number;
+      rotation_deg?: number;
+      room_id?: string;
+    }
+  ) => void;
   onApplyValidationFix: (issue: ValidationIssue) => void;
   onAutoFixAllIssues: () => void;
   canUndo: boolean;
@@ -75,8 +90,24 @@ interface InspectorSidebarProps {
   onUndo: () => void;
   onRedo: () => void;
   onOpenRuler: () => void;
-  onOpenFastApiModal: () => void;
 }
+
+const FURNITURE_KINDS: { value: FurnitureCategory; label: string }[] = [
+  { value: 'bed', label: 'Bed' },
+  { value: 'nightstand', label: 'Bedside Table' },
+  { value: 'wardrobe', label: 'Wardrobe' },
+  { value: 'sofa', label: 'Sofa' },
+  { value: 'coffee_table', label: 'Coffee Table' },
+  { value: 'tv_stand', label: 'TV Stand / Console' },
+  { value: 'dining_table', label: 'Dining Table' },
+  { value: 'kitchen_counter', label: 'Kitchen Counter & Sink' },
+  { value: 'fridge', label: 'Refrigerator' },
+  { value: 'shower', label: 'Shower Enclosure' },
+  { value: 'toilet', label: 'Toilet (WC)' },
+  { value: 'sink_vanity', label: 'Washbasin Vanity' },
+  { value: 'bathtub', label: 'Bathtub' },
+  { value: 'desk', label: 'Study Desk' },
+];
 
 function renderStatusBadge(status?: ConfidenceStatus) {
   if (status === 'invalid') {
@@ -120,6 +151,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   onUpdateWallGeometry,
   onUpdateOpeningGeometry,
   onUpdateRoomMeta,
+  onUpdateFurnitureGeometry,
   onApplyValidationFix,
   onAutoFixAllIssues,
   canUndo,
@@ -127,10 +159,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   onUndo,
   onRedo,
   onOpenRuler,
-  onOpenFastApiModal,
 }) => {
-  const [filterUncertainOnly, setFilterUncertainOnly] = useState(false);
-
   const { scale, walls, openings, rooms, furniture, model3d } = pipelineResult;
   const { provenance_report, evaluation_metrics, validation_issues } = model3d;
   const mPerPx = scale.meters_per_pixel;
@@ -159,7 +188,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
       .map((w) => ({
         kind: 'wall' as const,
         id: w.id,
-        label: `Wall ${w.id}`,
+        label: `Wall Border ${w.id}`,
         status: w.confidence_status!,
         reason: w.status_reason || 'Needs review',
       })),
@@ -168,7 +197,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
       .map((o) => ({
         kind: 'opening' as const,
         id: o.id,
-        label: `${o.kind === 'door' ? 'Door' : 'Window'} ${o.id}`,
+        label: `${o.kind === 'door' ? 'Door' : 'Window'} ${o.id} (on ${o.wall_id})`,
         status: o.confidence_status!,
         reason: o.status_reason || 'Needs review',
       })),
@@ -180,6 +209,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
         label: `${r.name} (${r.id})`,
         status: r.confidence_status!,
         reason: r.status_reason || 'Needs review',
+      })),
+    ...furniture
+      .filter((f) => f.confidence_status === 'invalid' || f.confidence_status === 'uncertain')
+      .map((f) => ({
+        kind: 'furniture' as const,
+        id: f.id,
+        label: `${f.label}`,
+        status: f.confidence_status!,
+        reason: f.status_reason || 'Needs review',
       })),
   ];
 
@@ -211,6 +249,45 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
     },
   ];
 
+  const handleExportTrainingAnnotations = () => {
+    const datasetPayload = {
+      schema_version: 'floorforge-obb-annotations-v1',
+      blueprint_name: pipelineResult.blueprint_name,
+      image_width_px: pipelineResult.image_width_px,
+      image_height_px: pipelineResult.image_height_px,
+      meters_per_pixel: mPerPx,
+      detector_mode: pipelineResult.execution_mode,
+      furniture_annotations: furniture.map((f) => ({
+        id: f.id,
+        category: f.kind,
+        room_id: f.room_id,
+        center_px: f.center_px,
+        width_px: f.width_px,
+        depth_px: f.depth_px,
+        rotation_deg: f.rotation_deg,
+        detected_bbox_px: f.detected_bbox_px,
+        detector_source: f.detector_source || 'blueprint_annotation',
+        user_verified: f.provenance === 'user_corrected',
+      })),
+      wall_annotations: walls.map((w) => ({
+        id: w.id,
+        start_px: w.start,
+        end_px: w.end,
+        thickness_px: w.thickness_px,
+        is_exterior: w.is_exterior,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(datasetPayload, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${pipelineResult.blueprint_name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-annotations.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <aside className="w-full lg:w-[400px] xl:w-[420px] shrink-0 bg-[#12161F] border-l border-[#222938] flex flex-col h-full overflow-y-auto">
       {/* Top Status & Quick Confidence Bar */}
@@ -237,14 +314,6 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               title="Redo Correction"
             >
               <Redo2 className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={onOpenFastApiModal}
-              className="px-2 py-1 rounded bg-[#181D29] hover:bg-[#222938] text-xs text-[#38BDF8] border border-[#222938] flex items-center gap-1"
-            >
-              <Code2 className="w-3 h-3" />
-              <span>API</span>
             </button>
           </div>
         </div>
@@ -306,7 +375,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                 : 'text-[#94A3B8] hover:text-[#F1F5F9]'
             }`}
           >
-            Evaluation
+            Diagnostics
           </button>
           <button
             type="button"
@@ -324,7 +393,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
 
       {/* Tab Body */}
       <div className="p-4 flex-1 space-y-4">
-        {/* TAB 1: AI CONFIDENCE & INTERACTIVE CORRECTION TOOL */}
+        {/* TAB 1: AI CONFIDENCE & INTERACTIVE BORDER/OBJECT CORRECTION TOOL */}
         {activeTab === 'correct' && (
           <div className="space-y-4">
             {/* Mark Missing Elements Toolbar */}
@@ -332,7 +401,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-[#F8FAFC] flex items-center gap-1.5">
                   <Wrench className="w-3.5 h-3.5 text-[#D97706]" />
-                  <span>Mark Missing Geometry on 2D Plan</span>
+                  <span>Edit Borders & Add Missing Elements</span>
                 </span>
                 {editorTool !== 'select' && (
                   <button
@@ -352,7 +421,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   }
                   className={`py-1.5 px-2 rounded text-xs font-medium border flex items-center justify-center gap-1 transition-colors ${
                     editorTool === 'add_wall'
-                      ? 'bg-[#A855F7]/25 border-[#A855F7] text-[#E9D5FF]'
+                      ? 'bg-[#D97706]/25 border-[#D97706] text-[#F8FAFC]'
                       : 'bg-[#181D29] border-[#222938] text-[#CBD5E1] hover:bg-[#222938]'
                   }`}
                 >
@@ -366,7 +435,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   }
                   className={`py-1.5 px-2 rounded text-xs font-medium border flex items-center justify-center gap-1 transition-colors ${
                     editorTool === 'add_door'
-                      ? 'bg-[#A855F7]/25 border-[#A855F7] text-[#E9D5FF]'
+                      ? 'bg-[#D97706]/25 border-[#D97706] text-[#F8FAFC]'
                       : 'bg-[#181D29] border-[#222938] text-[#CBD5E1] hover:bg-[#222938]'
                   }`}
                 >
@@ -380,7 +449,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   }
                   className={`py-1.5 px-2 rounded text-xs font-medium border flex items-center justify-center gap-1 transition-colors ${
                     editorTool === 'add_window'
-                      ? 'bg-[#A855F7]/25 border-[#A855F7] text-[#E9D5FF]'
+                      ? 'bg-[#D97706]/25 border-[#D97706] text-[#F8FAFC]'
                       : 'bg-[#181D29] border-[#222938] text-[#CBD5E1] hover:bg-[#222938]'
                   }`}
                 >
@@ -389,17 +458,17 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                 </button>
               </div>
               <p className="text-[11px] text-[#94A3B8]">
-                Click any element in 2D or 3D to inspect, confirm, reject, or adjust its dimensions.
+                Select & drag any wall border, room corner, door, or furniture item on the 2D canvas to update 3D live.
               </p>
             </div>
 
-            {/* Selected Element Inspector */}
+            {/* Selected Wall Border Inspector */}
             {selectedWall && (
               <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#D97706] space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <span className="text-xs font-bold text-[#F8FAFC]">
-                      Wall {selectedWall.id} ({selectedWall.is_exterior ? 'Exterior' : 'Partition'})
+                      Wall Border {selectedWall.id} ({selectedWall.is_exterior ? 'Exterior' : 'Partition'})
                     </span>
                     <div className="text-[11px] text-[#94A3B8] mt-0.5">
                       {selectedWall.status_reason}
@@ -416,7 +485,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     className="py-1.5 px-2.5 rounded bg-[#10B981]/20 hover:bg-[#10B981]/30 text-[#10B981] border border-[#10B981]/40 text-xs font-semibold flex items-center justify-center gap-1"
                   >
                     <Check className="w-3.5 h-3.5" />
-                    <span>Confirm Wall</span>
+                    <span>Confirm Border</span>
                   </button>
                   <button
                     type="button"
@@ -424,7 +493,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     className="py-1.5 px-2.5 rounded bg-[#EF4444]/15 hover:bg-[#EF4444]/25 text-[#EF4444] border border-[#EF4444]/40 text-xs font-semibold flex items-center justify-center gap-1"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Reject / Delete</span>
+                    <span>Delete Border</span>
                   </button>
                 </div>
 
@@ -541,6 +610,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               </div>
             )}
 
+            {/* Selected Door / Window Inspector */}
             {selectedOpening && (
               <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#D97706] space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -570,11 +640,30 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     className="py-1.5 px-2.5 rounded bg-[#EF4444]/15 hover:bg-[#EF4444]/25 text-[#EF4444] border border-[#EF4444]/40 text-xs font-semibold flex items-center justify-center gap-1"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Reject / Delete</span>
+                    <span>Delete</span>
                   </button>
                 </div>
 
                 <div className="space-y-2.5 pt-2 border-t border-[#222938] text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#94A3B8]">Attached Wall</span>
+                    <select
+                      value={selectedOpening.wall_id}
+                      onChange={(e) =>
+                        onUpdateOpeningGeometry(selectedOpening.id, {
+                          wall_id: e.target.value,
+                        })
+                      }
+                      className="px-2 py-1 bg-[#12161F] border border-[#222938] rounded font-mono text-xs text-[#F8FAFC]"
+                    >
+                      {walls.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.id} ({w.is_exterior ? 'Exterior' : 'Partition'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
                   <div className="flex items-center justify-between">
                     <span className="text-[#94A3B8]">Position Along Wall</span>
                     <span className="font-mono text-[#F8FAFC]">
@@ -618,6 +707,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               </div>
             )}
 
+            {/* Selected Room Inspector */}
             {selectedRoom && (
               <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#D97706] space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -673,6 +763,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               </div>
             )}
 
+            {/* Selected Furniture Object Inspector (Full Position, Size, Rotation & BBox Diagnostics) */}
             {selectedFurniture && (
               <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#D97706] space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -706,8 +797,131 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     className="py-1.5 px-2.5 rounded bg-[#EF4444]/15 hover:bg-[#EF4444]/25 text-[#EF4444] border border-[#EF4444]/40 text-xs font-semibold flex items-center justify-center gap-1"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>Remove Object</span>
+                    <span>Delete Object</span>
                   </button>
+                </div>
+
+                <div className="space-y-2.5 pt-2 border-t border-[#222938] text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#94A3B8]">Object Type</span>
+                    <select
+                      value={selectedFurniture.kind}
+                      onChange={(e) => {
+                        const newKind = e.target.value as FurnitureCategory;
+                        const found = FURNITURE_KINDS.find((k) => k.value === newKind);
+                        onUpdateFurnitureGeometry(selectedFurniture.id, {
+                          kind: newKind,
+                          label: found ? found.label : newKind,
+                        });
+                      }}
+                      className="px-2 py-1 bg-[#12161F] border border-[#222938] rounded text-xs text-[#F8FAFC]"
+                    >
+                      {FURNITURE_KINDS.map((k) => (
+                        <option key={k.value} value={k.value}>
+                          {k.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#94A3B8]">Orientation ({selectedFurniture.rotation_deg}°)</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateFurnitureGeometry(selectedFurniture.id, {
+                          rotation_deg: (selectedFurniture.rotation_deg + 90) % 360,
+                        })
+                      }
+                      className="px-2.5 py-1 bg-[#181D29] hover:bg-[#222938] text-[#F59E0B] border border-[#222938] rounded flex items-center gap-1 text-xs font-medium"
+                    >
+                      <RotateCw className="w-3 h-3" />
+                      <span>Rotate 90°</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] text-[#94A3B8] block mb-1">
+                        Center (X, Y px)
+                      </label>
+                      <div className="flex gap-1">
+                        <input
+                          type="number"
+                          value={Math.round(selectedFurniture.center_px.x)}
+                          onChange={(e) =>
+                            onUpdateFurnitureGeometry(selectedFurniture.id, {
+                              center_px: {
+                                x: Number(e.target.value),
+                                y: selectedFurniture.center_px.y,
+                              },
+                            })
+                          }
+                          className="w-full px-1.5 py-1 bg-[#12161F] border border-[#222938] rounded font-mono text-[11px] text-[#F8FAFC]"
+                        />
+                        <input
+                          type="number"
+                          value={Math.round(selectedFurniture.center_px.y)}
+                          onChange={(e) =>
+                            onUpdateFurnitureGeometry(selectedFurniture.id, {
+                              center_px: {
+                                x: selectedFurniture.center_px.x,
+                                y: Number(e.target.value),
+                              },
+                            })
+                          }
+                          className="w-full px-1.5 py-1 bg-[#12161F] border border-[#222938] rounded font-mono text-[11px] text-[#F8FAFC]"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-[#94A3B8] block mb-1">
+                        Size W × D (px)
+                      </label>
+                      <div className="flex gap-1">
+                        <input
+                          type="number"
+                          min="24"
+                          max="400"
+                          value={Math.round(selectedFurniture.width_px)}
+                          onChange={(e) =>
+                            onUpdateFurnitureGeometry(selectedFurniture.id, {
+                              width_px: Math.max(24, Number(e.target.value)),
+                            })
+                          }
+                          className="w-full px-1.5 py-1 bg-[#12161F] border border-[#222938] rounded font-mono text-[11px] text-[#F8FAFC]"
+                        />
+                        <input
+                          type="number"
+                          min="24"
+                          max="400"
+                          value={Math.round(selectedFurniture.depth_px)}
+                          onChange={(e) =>
+                            onUpdateFurnitureGeometry(selectedFurniture.id, {
+                              depth_px: Math.max(24, Number(e.target.value)),
+                            })
+                          }
+                          className="w-full px-1.5 py-1 bg-[#12161F] border border-[#222938] rounded font-mono text-[11px] text-[#F8FAFC]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {selectedFurniture.detected_bbox_px && (
+                    <div className="p-2 rounded bg-[#12161F] border border-[#222938] text-[10px] font-mono text-[#94A3B8] space-y-0.5">
+                      <div>
+                        Source BBox: [{selectedFurniture.detected_bbox_px.xmin},{' '}
+                        {selectedFurniture.detected_bbox_px.ymin},{' '}
+                        {selectedFurniture.detected_bbox_px.xmax},{' '}
+                        {selectedFurniture.detected_bbox_px.ymax}] px
+                      </div>
+                      <div>
+                        Detector: {selectedFurniture.detector_source || 'blueprint_annotation'} ·{' '}
+                        {(selectedFurniture.width_px * mPerPx).toFixed(2)}m ×{' '}
+                        {(selectedFurniture.depth_px * mPerPx).toFixed(2)}m
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -723,12 +937,12 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                   type="button"
                   onClick={() =>
                     onChangeOverlayColorMode(
-                      overlayColorMode === 'confidence' ? 'provenance' : 'confidence'
+                      overlayColorMode === 'confidence' ? 'diagnostics' : 'confidence'
                     )
                   }
                   className="text-[11px] text-[#38BDF8] hover:underline"
                 >
-                  2D Mode: {overlayColorMode === 'confidence' ? 'Confidence' : 'Provenance'}
+                  2D Mode: {overlayColorMode === 'confidence' ? 'Confidence' : 'Detection Boxes'}
                 </button>
               </div>
 
@@ -736,11 +950,19 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                 <div className="p-4 rounded-md bg-[#10B981]/10 border border-[#10B981]/30 text-xs text-[#10B981] flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
                   <span>
-                    All walls, rooms, doors, and windows are verified at High Confidence!
+                    All walls, rooms, doors, windows, and furniture are verified at High Confidence!
                   </span>
                 </div>
               ) : (
                 <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={onAutoFixAllIssues}
+                    className="w-full py-1.5 px-3 rounded bg-[#D97706] hover:bg-[#F59E0B] text-[#F8FAFC] text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <Wrench className="w-3.5 h-3.5" />
+                    <span>Auto-Fix & Confirm All Flagged ({reviewQueue.length})</span>
+                  </button>
                   {reviewQueue.map((item) => {
                     const isSel =
                       selectedElement?.kind === item.kind && selectedElement.id === item.id;
@@ -881,67 +1103,62 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
           </div>
         )}
 
-        {/* TAB 3: EVALUATION DASHBOARD & PROVENANCE REPORT */}
+        {/* TAB 3: DETECTOR DIAGNOSTICS, TRANSPARENCY & EVALUATION METRICS */}
         {activeTab === 'report' && (
           <div className="space-y-4">
-            {/* Reconstruction Provenance Breakdown */}
-            <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#222938] space-y-2.5">
+            {/* Furniture Detector Architecture & Fine-Tuning Transparency */}
+            <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#222938] space-y-2.5 text-xs">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[#F8FAFC] flex items-center gap-1.5">
-                  <GitBranch className="w-3.5 h-3.5 text-[#A855F7]" />
-                  <span>Reconstruction Provenance Report</span>
+                <span className="font-semibold text-[#F8FAFC] flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5 text-[#38BDF8]" />
+                  <span>Furniture Detector Transparency</span>
                 </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onChangeOverlayColorMode('provenance');
-                    onChangeConfig((prev) => ({
-                      ...prev,
-                      material_theme:
-                        prev.material_theme === 'provenance_overlay'
-                          ? 'studio'
-                          : 'provenance_overlay',
-                    }));
-                  }}
-                  className="text-[11px] text-[#C084FC] hover:underline"
-                >
-                  Highlight in 2D & 3D
-                </button>
+                <span className="px-1.5 py-0.5 rounded bg-[#38BDF8]/15 text-[#38BDF8] font-mono text-[10px]">
+                  {pipelineResult.execution_mode === 'gemini_vision_assisted'
+                    ? 'Zero-Shot VLM'
+                    : pipelineResult.execution_mode === 'custom_raster_cv'
+                    ? 'Contour Heuristic'
+                    : 'Reference Symbols'}
+                </span>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="p-2 rounded bg-[#12161F] border border-[#222938]">
-                  <div className="text-[11px] text-[#38BDF8]">AI-Detected Geometry</div>
-                  <div className="text-base font-mono font-bold text-[#F8FAFC] tabular-nums">
-                    {provenance_report.ai_detected_count}
-                  </div>
+              <p className="text-[11px] text-[#94A3B8] leading-relaxed">
+                FloorForge separates <strong>Furniture Detection</strong> from optional{' '}
+                <strong>Room Completion</strong>. The current detector is <em>not</em> a custom-trained
+                floor-plan neural network; it combines a zero-shot VLM (Gemini 3 Flash Vision bounding
+                boxes) with a local 2D connected-component contour heuristic.
+              </p>
+
+              <div className="p-2.5 rounded bg-[#12161F] border border-[#222938] space-y-1 text-[11px] text-[#CBD5E1]">
+                <div className="font-semibold text-[#F59E0B]">
+                  How to Fine-Tune for Production CAD Symbols:
                 </div>
-                <div className="p-2 rounded bg-[#12161F] border border-[#222938]">
-                  <div className="text-[11px] text-[#A855F7]">User-Corrected</div>
-                  <div className="text-base font-mono font-bold text-[#C084FC] tabular-nums">
-                    {provenance_report.user_corrected_count}
-                  </div>
-                </div>
-                <div className="p-2 rounded bg-[#12161F] border border-[#222938]">
-                  <div className="text-[11px] text-[#F59E0B]">Inferred / Generated</div>
-                  <div className="text-base font-mono font-bold text-[#F59E0B] tabular-nums">
-                    {provenance_report.inferred_completion_count}
-                  </div>
-                </div>
-                <div className="p-2 rounded bg-[#12161F] border border-[#222938]">
-                  <div className="text-[11px] text-[#EF4444]">Unresolved Elements</div>
-                  <div className="text-base font-mono font-bold text-[#EF4444] tabular-nums">
-                    {provenance_report.unresolved_count}
-                  </div>
-                </div>
+                <p className="text-[#94A3B8]">
+                  1. Train an oriented bounding-box detector (<strong>YOLOv8-OBB</strong> or{' '}
+                  <strong>RT-DETR</strong>) on <strong>CubiCasa5k</strong> / <strong>SESYD</strong> +
+                  labelled Indian architectural floor plans with <code>(cx, cy, w, h, θ)</code> labels.
+                </p>
+                <p className="text-[#94A3B8]">
+                  2. Drag & verify objects on the 2D canvas, then export verified annotations below to
+                  build your fine-tuning dataset.
+                </p>
               </div>
+
+              <button
+                type="button"
+                onClick={handleExportTrainingAnnotations}
+                className="w-full py-1.5 px-3 rounded bg-[#181D29] hover:bg-[#222938] text-[#38BDF8] border border-[#222938] text-xs font-semibold flex items-center justify-center gap-1.5"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export Verified Annotations (.JSON)</span>
+              </button>
             </div>
 
             {/* Honest Evaluation Metrics */}
             <div className="p-3.5 rounded-md bg-[#0B0D11] border border-[#222938] space-y-2.5 text-xs">
               <div className="font-semibold text-[#F8FAFC]">Evaluation Metrics</div>
 
-              <div className="grid grid-cols-3 gap-2 text-center bg-[#12161F] p-2 rounded border border-[#222938]">
+              <div className="grid grid-cols-4 gap-1.5 text-center bg-[#12161F] p-2 rounded border border-[#222938]">
                 <div>
                   <div className="text-[10px] text-[#94A3B8]">Walls</div>
                   <div className="font-mono font-semibold text-[#F8FAFC]">
@@ -954,10 +1171,16 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     {evaluation_metrics.total_rooms}
                   </div>
                 </div>
-                <div>
+                <div className="border-r border-[#222938]">
                   <div className="text-[10px] text-[#94A3B8]">Doors/Win</div>
                   <div className="font-mono font-semibold text-[#F8FAFC]">
                     {evaluation_metrics.total_openings}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-[#94A3B8]">Objects</div>
+                  <div className="font-mono font-semibold text-[#38BDF8]">
+                    {furniture.length}
                   </div>
                 </div>
               </div>
@@ -1035,7 +1258,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
 
                 <div className="text-[#CBD5E1] py-1 border-t border-[#222938]">User Edits</div>
                 <div className="text-right text-[#94A3B8] py-1 border-t border-[#222938]">0</div>
-                <div className="text-right text-[#C084FC] font-bold py-1 border-t border-[#222938]">
+                <div className="text-right text-[#38BDF8] font-bold py-1 border-t border-[#222938]">
                   {evaluation_metrics.user_corrections_count}
                 </div>
               </div>
@@ -1046,13 +1269,18 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
         {/* TAB 4: ROOMS, OBJECTS & 3D PARAMETERS */}
         {activeTab === 'rooms' && (
           <div className="space-y-4">
-            {/* Strict Accuracy Toggle for Drawn vs Inferred Furniture */}
-            <label className="flex items-center justify-between px-3 py-2 rounded bg-[#0B0D11] border border-[#222938] text-xs cursor-pointer">
-              <span className="text-[#94A3B8]">
-                {config.show_generated_completion
-                  ? 'Objects: Drawn + Inferred'
-                  : 'Strict: Drawn Objects Only'}
-              </span>
+            {/* Separate Detection vs Optional Auto-Furnish Empty Rooms Toggle */}
+            <label className="flex items-center justify-between px-3 py-2.5 rounded bg-[#0B0D11] border border-[#222938] text-xs cursor-pointer">
+              <div>
+                <div className="font-semibold text-[#F8FAFC]">
+                  {config.show_generated_completion
+                    ? 'Mode: Detected + Auto-Furnish Empty Rooms'
+                    : 'Strict Mode: Detected Plan Furniture Only'}
+                </div>
+                <div className="text-[10px] text-[#94A3B8]">
+                  Never duplicates furniture already drawn in the source plan
+                </div>
+              </div>
               <input
                 type="checkbox"
                 checked={config.show_generated_completion}
@@ -1062,7 +1290,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     show_generated_completion: e.target.checked,
                   }))
                 }
-                className="accent-[#D97706] w-4 h-4 rounded"
+                className="accent-[#D97706] w-4 h-4 rounded shrink-0"
               />
             </label>
 
@@ -1143,9 +1371,18 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     {roomObjects.length > 0 && (
                       <div className="mt-2 pt-2 border-t border-[#222938]/80 flex flex-wrap gap-1.5 text-[11px]">
                         {roomObjects.map((obj) => (
-                          <span key={obj.id} className="font-mono text-[#10B981]">
+                          <button
+                            key={obj.id}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onSelectElement({ kind: 'furniture', id: obj.id });
+                              onChangeTab('correct');
+                            }}
+                            className="font-mono text-[#10B981] hover:underline"
+                          >
                             • {obj.label}
-                          </span>
+                          </button>
                         ))}
                       </div>
                     )}
