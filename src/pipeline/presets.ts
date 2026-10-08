@@ -1,15 +1,108 @@
 import { BlueprintPreset, FurnitureElement, RoomPolygon } from '../types/floorforge';
 
 /**
- * Helper that automatically generates realistic, collision-free interior furniture and fixtures
- * (Beds, Bathtubs, Toilets, Sinks, Sofas, Kitchen Counters, Dining Tables, Desks)
- * for any set of detected rooms! Used for custom uploaded floor plans and AI Vision rooms.
+ * Ensures no two furniture items in a room overlap and every item stays
+ * comfortably inside the room's inner wall clearance boundary.
+ */
+export function decollideRoomFurniture(
+  items: FurnitureElement[],
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  wallMarginPx = 22,
+  minGapPx = 16
+): FurnitureElement[] {
+  const safeMinX = minX + wallMarginPx;
+  const safeMaxX = maxX - wallMarginPx;
+  const safeMinY = minY + wallMarginPx;
+  const safeMaxY = maxY - wallMarginPx;
+  const safeW = Math.max(40, safeMaxX - safeMinX);
+  const safeH = Math.max(40, safeMaxY - safeMinY);
+
+  const placed: FurnitureElement[] = [];
+
+  for (const rawItem of items) {
+    const item = structuredClone(rawItem);
+    // Cap item dimensions so a single piece never dominates a tight room
+    item.width_px = Math.min(item.width_px, Math.round(safeW * 0.46));
+    item.depth_px = Math.min(item.depth_px, Math.round(safeH * 0.46));
+
+    const hw = item.width_px / 2;
+    const hd = item.depth_px / 2;
+
+    // Clamp inside room safe zone
+    item.center_px.x = Math.round(
+      Math.max(safeMinX + hw, Math.min(safeMaxX - hw, item.center_px.x))
+    );
+    item.center_px.y = Math.round(
+      Math.max(safeMinY + hd, Math.min(safeMaxY - hd, item.center_px.y))
+    );
+
+    // Iteratively resolve AABB overlap with already placed items in this room
+    let hasUnresolvableOverlap = false;
+    for (let iter = 0; iter < 8; iter++) {
+      let moved = false;
+      for (const other of placed) {
+        const reqDx = (item.width_px + other.width_px) / 2 + minGapPx;
+        const reqDy = (item.depth_px + other.depth_px) / 2 + minGapPx;
+        const dx = item.center_px.x - other.center_px.x;
+        const dy = item.center_px.y - other.center_px.y;
+
+        if (Math.abs(dx) < reqDx && Math.abs(dy) < reqDy) {
+          const overlapX = reqDx - Math.abs(dx);
+          const overlapY = reqDy - Math.abs(dy);
+          if (overlapX < overlapY) {
+            const dirX = dx >= 0 ? 1 : -1;
+            item.center_px.x = Math.round(item.center_px.x + dirX * (overlapX + 2));
+          } else {
+            const dirY = dy >= 0 ? 1 : -1;
+            item.center_px.y = Math.round(item.center_px.y + dirY * (overlapY + 2));
+          }
+
+          // Re-clamp to room interior
+          item.center_px.x = Math.round(
+            Math.max(safeMinX + hw, Math.min(safeMaxX - hw, item.center_px.x))
+          );
+          item.center_px.y = Math.round(
+            Math.max(safeMinY + hd, Math.min(safeMaxY - hd, item.center_px.y))
+          );
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+
+    // Final check: if still overlapping after nudging, skip secondary item to keep room spacious
+    for (const other of placed) {
+      const reqDx = (item.width_px + other.width_px) / 2 + 6;
+      const reqDy = (item.depth_px + other.depth_px) / 2 + 6;
+      if (
+        Math.abs(item.center_px.x - other.center_px.x) < reqDx &&
+        Math.abs(item.center_px.y - other.center_px.y) < reqDy
+      ) {
+        hasUnresolvableOverlap = true;
+        break;
+      }
+    }
+
+    if (!hasUnresolvableOverlap) {
+      placed.push(item);
+    }
+  }
+
+  return placed;
+}
+
+/**
+ * Generates spacious, architecturally balanced, collision-free interior furniture
+ * sets for Bedrooms, Bathrooms, Living Rooms, Kitchens, and Offices.
  */
 export function synthesizeFurnitureForRooms(
   rooms: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'length_m'>[],
   mPerPx: number
 ): FurnitureElement[] {
-  const items: FurnitureElement[] = [];
+  const allItems: FurnitureElement[] = [];
   const pxForMeters = (m: number) => Math.round(m / Math.max(0.005, mPerPx));
 
   rooms.forEach((room, idx) => {
@@ -24,336 +117,363 @@ export function synthesizeFurnitureForRooms(
     const spanW = maxX - minX;
     const spanH = maxY - minY;
 
-    if (spanW < 60 || spanH < 60) return;
+    if (spanW < 90 || spanH < 90) return;
+
+    const baseProv =
+      room.provenance === 'generated_completion' ? 'generated_completion' : 'observed';
+    const roomItems: FurnitureElement[] = [];
+    const wallPad = 24;
 
     if (room.category === 'bedroom') {
-      // Double Bed against top wall of bedroom
-      const bedW = Math.min(spanW * 0.48, pxForMeters(1.8));
-      const bedD = Math.min(spanH * 0.56, pxForMeters(2.05));
-      const bedY = Math.round(minY + bedD / 2 + 16);
-      items.push({
+      // 1. Center-North King/Queen Bed (compact, realistic scale leaving wide walking aisles)
+      const bedW = Math.min(spanW * 0.36, pxForMeters(1.62));
+      const bedD = Math.min(spanH * 0.44, pxForMeters(1.88));
+      const bedX = Math.round(cx - spanW * 0.06);
+      const bedY = Math.round(minY + wallPad + bedD / 2);
+
+      roomItems.push({
         id: `FURN-${idx}-BED`,
         room_id: room.id,
         kind: 'bed',
-        label: 'Queen Platform Bed',
-        center_px: { x: cx, y: bedY },
+        label: 'Teak King Bed, Pillows, Duvet & Wall Art',
+        center_px: { x: bedX, y: bedY },
         width_px: Math.round(bedW),
         depth_px: Math.round(bedD),
-        height_m: 0.95,
+        height_m: 1.02,
         rotation_deg: 0,
-        confidence: 0.95,
-        provenance: 'observed',
+        confidence: 0.96,
+        provenance: baseProv,
       });
 
-      // Nightstand beside bed
-      const nsSize = Math.min(spanW * 0.14, pxForMeters(0.5));
-      if (cx - bedW / 2 - nsSize > minX + 10) {
-        items.push({
-          id: `FURN-${idx}-NS1`,
+      // 2. Left & Right Bedside Tables (Nightstands) with generous gap from bed
+      if (spanW >= 260) {
+        const nsW = Math.min(spanW * 0.1, pxForMeters(0.42));
+        const nsD = Math.min(spanH * 0.12, pxForMeters(0.38));
+        const nsY = Math.round(minY + wallPad + nsD / 2 + 2);
+        const gapPx = 18;
+
+        roomItems.push({
+          id: `FURN-${idx}-NSL`,
           room_id: room.id,
           kind: 'nightstand',
-          label: 'Bedside Nightstand',
-          center_px: { x: Math.round(cx - bedW / 2 - nsSize * 0.75), y: Math.round(minY + nsSize / 2 + 16) },
-          width_px: Math.round(nsSize),
-          depth_px: Math.round(nsSize),
-          height_m: 0.58,
+          label: 'Left Bedside Table & Warm Lamp',
+          center_px: { x: Math.round(bedX - bedW / 2 - nsW / 2 - gapPx), y: nsY },
+          width_px: Math.round(nsW),
+          depth_px: Math.round(nsD),
+          height_m: 0.56,
           rotation_deg: 0,
-          confidence: 0.87,
-          provenance: 'generated_completion',
+          confidence: 0.94,
+          provenance: baseProv,
+        });
+
+        roomItems.push({
+          id: `FURN-${idx}-NSR`,
+          room_id: room.id,
+          kind: 'nightstand',
+          label: 'Right Bedside Table & Warm Lamp',
+          center_px: { x: Math.round(bedX + bedW / 2 + nsW / 2 + gapPx), y: nsY },
+          width_px: Math.round(nsW),
+          depth_px: Math.round(nsD),
+          height_m: 0.56,
+          rotation_deg: 0,
+          confidence: 0.94,
+          provenance: baseProv,
         });
       }
 
-      // Wardrobe along side/bottom wall
-      const wardW = Math.min(spanW * 0.42, pxForMeters(1.6));
-      const wardD = Math.min(spanH * 0.18, pxForMeters(0.6));
-      items.push({
+      // 3. Sliding Teak Wardrobe tucked against East wall (bottom-right), well clear of bed & doors
+      const wardW = Math.min(spanW * 0.34, pxForMeters(1.45));
+      const wardD = Math.min(spanH * 0.14, pxForMeters(0.52));
+      roomItems.push({
         id: `FURN-${idx}-WARD`,
         room_id: room.id,
         kind: 'wardrobe',
-        label: 'Built-In Wardrobe',
-        center_px: { x: Math.round(maxX - wardW / 2 - 18), y: Math.round(maxY - wardD / 2 - 16) },
+        label: 'Sliding Teak & Fluted-Glass Wardrobe',
+        center_px: {
+          x: Math.round(maxX - wallPad - wardW / 2),
+          y: Math.round(maxY - wallPad - wardD / 2),
+        },
         width_px: Math.round(wardW),
         depth_px: Math.round(wardD),
         height_m: 2.1,
-        rotation_deg: 0,
-        confidence: 0.89,
-        provenance: 'generated_completion',
+        rotation_deg: 180,
+        confidence: 0.94,
+        provenance: baseProv,
       });
     } else if (room.category === 'bathroom') {
-      // Bathtub along top or right wall
-      const tubW = Math.min(spanW * 0.52, pxForMeters(1.65));
-      const tubD = Math.min(spanH * 0.28, pxForMeters(0.75));
-      items.push({
-        id: `FURN-${idx}-TUB`,
+      // 1. Walk-In Glass Shower Enclosure in North-East corner
+      const shwW = Math.min(spanW * 0.36, pxForMeters(1.0));
+      const shwD = Math.min(spanH * 0.34, pxForMeters(0.92));
+      roomItems.push({
+        id: `FURN-${idx}-SHOWER`,
         room_id: room.id,
-        kind: 'bathtub',
-        label: 'Soaking Bathtub',
-        center_px: { x: Math.round(maxX - tubW / 2 - 16), y: Math.round(minY + tubD / 2 + 16) },
-        width_px: Math.round(tubW),
-        depth_px: Math.round(tubD),
-        height_m: 0.62,
+        kind: 'shower',
+        label: 'Frameless Glass Shower Enclosure & Rainhead',
+        center_px: {
+          x: Math.round(maxX - wallPad - shwW / 2),
+          y: Math.round(minY + wallPad + shwD / 2),
+        },
+        width_px: Math.round(shwW),
+        depth_px: Math.round(shwD),
+        height_m: 2.0,
         rotation_deg: 0,
-        confidence: 0.94,
-        provenance: 'observed',
+        confidence: 0.95,
+        provenance: baseProv,
       });
 
-      // Toilet WC
-      const wcW = Math.min(spanW * 0.2, pxForMeters(0.48));
-      const wcD = Math.min(spanH * 0.24, pxForMeters(0.68));
-      items.push({
+      // 2. Wall-Hung Ceramic Toilet (WC) in South-West corner
+      const wcW = Math.min(spanW * 0.18, pxForMeters(0.44));
+      const wcD = Math.min(spanH * 0.2, pxForMeters(0.58));
+      roomItems.push({
         id: `FURN-${idx}-WC`,
         room_id: room.id,
         kind: 'toilet',
-        label: 'Ceramic Toilet (WC)',
-        center_px: { x: Math.round(minX + wcW / 2 + 22), y: Math.round(maxY - wcD / 2 - 16) },
+        label: 'Wall-Hung Ceramic WC & Flush Plate',
+        center_px: {
+          x: Math.round(minX + wallPad + wcW / 2 + 8),
+          y: Math.round(maxY - wallPad - wcD / 2),
+        },
         width_px: Math.round(wcW),
         depth_px: Math.round(wcD),
         height_m: 0.78,
         rotation_deg: 180,
         confidence: 0.96,
-        provenance: 'observed',
+        provenance: baseProv,
       });
 
-      // Vanity Sink
-      const sinkW = Math.min(spanW * 0.34, pxForMeters(0.95));
-      const sinkD = Math.min(spanH * 0.2, pxForMeters(0.55));
-      items.push({
+      // 3. Marble Washbasin Vanity & Backlit LED Mirror in South-East corner
+      const sinkW = Math.min(spanW * 0.32, pxForMeters(0.88));
+      const sinkD = Math.min(spanH * 0.18, pxForMeters(0.48));
+      roomItems.push({
         id: `FURN-${idx}-SINK`,
         room_id: room.id,
         kind: 'sink_vanity',
-        label: 'Double Vanity & Basin',
-        center_px: { x: Math.round(maxX - sinkW / 2 - 18), y: Math.round(maxY - sinkD / 2 - 16) },
+        label: 'Marble Washbasin Vanity & LED Mirror',
+        center_px: {
+          x: Math.round(maxX - wallPad - sinkW / 2),
+          y: Math.round(maxY - wallPad - sinkD / 2),
+        },
         width_px: Math.round(sinkW),
         depth_px: Math.round(sinkD),
-        height_m: 0.86,
+        height_m: 1.8,
         rotation_deg: 180,
-        confidence: 0.93,
-        provenance: 'observed',
+        confidence: 0.95,
+        provenance: baseProv,
       });
     } else if (room.category === 'living') {
-      // Lounge Sofa
-      const sofaW = Math.min(spanW * 0.48, pxForMeters(2.35));
-      const sofaD = Math.min(spanH * 0.26, pxForMeters(0.95));
-      items.push({
+      // 1. Designer Sofa along North wall
+      const sofaW = Math.min(spanW * 0.42, pxForMeters(2.15));
+      const sofaD = Math.min(spanH * 0.22, pxForMeters(0.86));
+      const sofaX = Math.round(cx - spanW * 0.05);
+      const sofaY = Math.round(minY + wallPad + sofaD / 2 + 6);
+
+      roomItems.push({
         id: `FURN-${idx}-SOFA`,
         room_id: room.id,
         kind: 'sofa',
-        label: '3-Seater Sectional Sofa',
-        center_px: { x: Math.round(cx - spanW * 0.08), y: Math.round(cy - spanH * 0.12) },
+        label: 'Designer Sofa, Silk Cushions & Floor Lamp',
+        center_px: { x: sofaX, y: sofaY },
         width_px: Math.round(sofaW),
         depth_px: Math.round(sofaD),
-        height_m: 0.82,
+        height_m: 0.84,
         rotation_deg: 0,
-        confidence: 0.96,
-        provenance: 'observed',
+        confidence: 0.97,
+        provenance: baseProv,
       });
 
-      // Coffee Table
-      const ctW = Math.min(spanW * 0.28, pxForMeters(1.25));
-      const ctD = Math.min(spanH * 0.18, pxForMeters(0.68));
-      items.push({
+      // 2. Travertine Coffee Table in center with 32px legroom gap from sofa
+      const ctW = Math.min(spanW * 0.24, pxForMeters(1.1));
+      const ctD = Math.min(spanH * 0.14, pxForMeters(0.58));
+      const ctY = Math.round(sofaY + sofaD / 2 + ctD / 2 + 32);
+
+      roomItems.push({
         id: `FURN-${idx}-CT`,
         room_id: room.id,
         kind: 'coffee_table',
-        label: 'Low Travertine Table',
-        center_px: { x: Math.round(cx - spanW * 0.08), y: Math.round(cy + spanH * 0.14) },
+        label: 'Travertine & Brass Coffee Table',
+        center_px: { x: sofaX, y: ctY },
         width_px: Math.round(ctW),
         depth_px: Math.round(ctD),
         height_m: 0.42,
         rotation_deg: 0,
-        confidence: 0.91,
-        provenance: 'observed',
+        confidence: 0.95,
+        provenance: baseProv,
       });
 
-      // Media Console / TV Stand along bottom/side
-      const tvW = Math.min(spanW * 0.4, pxForMeters(1.8));
-      const tvD = Math.min(spanH * 0.14, pxForMeters(0.45));
-      items.push({
+      // 3. Fluted Teak TV Unit along South wall facing sofa
+      const tvW = Math.min(spanW * 0.36, pxForMeters(1.75));
+      const tvD = Math.min(spanH * 0.12, pxForMeters(0.4));
+      roomItems.push({
         id: `FURN-${idx}-TV`,
         room_id: room.id,
         kind: 'tv_stand',
-        label: 'Media Credenza & Display',
-        center_px: { x: Math.round(cx - spanW * 0.08), y: Math.round(maxY - tvD / 2 - 18) },
+        label: 'Fluted Teak TV Unit & 65" OLED Panel',
+        center_px: {
+          x: sofaX,
+          y: Math.round(maxY - wallPad - tvD / 2),
+        },
         width_px: Math.round(tvW),
         depth_px: Math.round(tvD),
-        height_m: 1.15,
-        rotation_deg: 0,
-        confidence: 0.86,
-        provenance: 'generated_completion',
+        height_m: 1.6,
+        rotation_deg: 180,
+        confidence: 0.95,
+        provenance: baseProv,
       });
     } else if (room.category === 'kitchen') {
-      // Kitchen Countertop + Hob + Sink along left/bottom wall
-      const cntW = Math.min(spanW * 0.68, pxForMeters(2.4));
-      const cntD = Math.min(spanH * 0.22, pxForMeters(0.65));
-      items.push({
+      // 1. Modular Kitchen Counter, Sink, Hob & Backsplash along South-West wall
+      const cntW = Math.min(spanW * 0.48, pxForMeters(2.05));
+      const cntD = Math.min(spanH * 0.2, pxForMeters(0.58));
+      roomItems.push({
         id: `FURN-${idx}-KCNT`,
         room_id: room.id,
         kind: 'kitchen_counter',
-        label: 'Kitchen Counter & Induction Hob',
-        center_px: { x: Math.round(minX + cntW / 2 + 16), y: Math.round(maxY - cntD / 2 - 16) },
+        label: 'Modular Cabinets, Quartz Counter, Sink & Backsplash',
+        center_px: {
+          x: Math.round(minX + wallPad + cntW / 2),
+          y: Math.round(maxY - wallPad - cntD / 2),
+        },
         width_px: Math.round(cntW),
         depth_px: Math.round(cntD),
-        height_m: 0.9,
-        rotation_deg: 0,
-        confidence: 0.95,
-        provenance: 'observed',
+        height_m: 2.05,
+        rotation_deg: 180,
+        confidence: 0.96,
+        provenance: baseProv,
       });
 
-      // Refrigerator
-      const frSize = Math.min(spanW * 0.2, pxForMeters(0.75));
-      items.push({
+      // 2. Double-Door Smart Refrigerator in South-East corner (cleanly separated from counter)
+      const frW = Math.min(spanW * 0.18, pxForMeters(0.76));
+      const frD = Math.min(spanH * 0.2, pxForMeters(0.62));
+      roomItems.push({
         id: `FURN-${idx}-FRIDGE`,
         room_id: room.id,
         kind: 'fridge',
-        label: 'Integrated Refrigerator',
-        center_px: { x: Math.round(minX + frSize / 2 + 16), y: Math.round(minY + frSize / 2 + 24) },
-        width_px: Math.round(frSize),
-        depth_px: Math.round(frSize),
-        height_m: 1.85,
-        rotation_deg: 0,
-        confidence: 0.88,
-        provenance: 'generated_completion',
+        label: 'Double-Door Smart Refrigerator',
+        center_px: {
+          x: Math.round(maxX - wallPad - frW / 2),
+          y: Math.round(maxY - wallPad - frD / 2),
+        },
+        width_px: Math.round(frW),
+        depth_px: Math.round(frD),
+        height_m: 1.82,
+        rotation_deg: 180,
+        confidence: 0.95,
+        provenance: baseProv,
       });
 
-      // Dining Table
-      const dtW = Math.min(spanW * 0.42, pxForMeters(1.4));
-      const dtD = Math.min(spanH * 0.32, pxForMeters(0.9));
-      items.push({
+      // 3. Compact 4-Seat Teak Dining Table in North zone with wide aisle clearance
+      const dtW = Math.min(spanW * 0.34, pxForMeters(1.25));
+      const dtD = Math.min(spanH * 0.24, pxForMeters(0.78));
+      roomItems.push({
         id: `FURN-${idx}-DINE`,
         room_id: room.id,
         kind: 'dining_table',
-        label: '4-Seat Dining Table',
-        center_px: { x: Math.round(cx + spanW * 0.14), y: Math.round(cy - spanH * 0.08) },
+        label: 'Teak Dining Table & 4 Upholstered Chairs',
+        center_px: {
+          x: Math.round(minX + wallPad + dtW / 2 + 18),
+          y: Math.round(minY + wallPad + dtD / 2 + 12),
+        },
         width_px: Math.round(dtW),
         depth_px: Math.round(dtD),
         height_m: 0.76,
         rotation_deg: 0,
-        confidence: 0.9,
-        provenance: 'observed',
+        confidence: 0.93,
+        provenance: baseProv,
       });
     } else if (room.category === 'office') {
-      // Study Desk
-      const dskW = Math.min(spanW * 0.5, pxForMeters(1.5));
-      const dskD = Math.min(spanH * 0.24, pxForMeters(0.75));
-      items.push({
+      const dskW = Math.min(spanW * 0.42, pxForMeters(1.38));
+      const dskD = Math.min(spanH * 0.2, pxForMeters(0.66));
+      roomItems.push({
         id: `FURN-${idx}-DESK`,
         room_id: room.id,
         kind: 'desk',
-        label: 'Architectural Work Desk',
-        center_px: { x: cx, y: Math.round(minY + dskD / 2 + 26) },
+        label: 'Study Desk, Chair & Bookshelf',
+        center_px: { x: cx, y: Math.round(minY + wallPad + dskD / 2 + 8) },
         width_px: Math.round(dskW),
         depth_px: Math.round(dskD),
-        height_m: 0.75,
+        height_m: 0.76,
         rotation_deg: 0,
-        confidence: 0.92,
-        provenance: 'observed',
-      });
-
-      // Second Guest Bed or Bookcase in Study
-      const bkW = Math.min(spanW * 0.45, pxForMeters(1.4));
-      const bkD = Math.min(spanH * 0.16, pxForMeters(0.45));
-      items.push({
-        id: `FURN-${idx}-BOOK`,
-        room_id: room.id,
-        kind: 'wardrobe',
-        label: 'Shelving Credenza',
-        center_px: { x: cx, y: Math.round(maxY - bkD / 2 - 16) },
-        width_px: Math.round(bkW),
-        depth_px: Math.round(bkD),
-        height_m: 1.8,
-        rotation_deg: 0,
-        confidence: 0.85,
-        provenance: 'generated_completion',
+        confidence: 0.93,
+        provenance: baseProv,
       });
     }
+
+    // Run strict per-room de-collision pass so zero objects ever overlap!
+    const cleanRoomItems = decollideRoomFurniture(roomItems, minX, minY, maxX, maxY, wallPad, 18);
+    allItems.push(...cleanRoomItems);
   });
 
-  return items;
+  return allItems;
 }
 
-const NORDIC_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'length_m'>[] = [
+const RESIDENCE_2BHK_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'length_m'>[] = [
   {
     id: 'R-01',
     name: 'Living & Dining Salon',
     category: 'living',
     polygon: [
-      { x: 100, y: 80 },
-      { x: 520, y: 80 },
-      { x: 520, y: 410 },
-      { x: 100, y: 410 },
+      { x: 80, y: 70 },
+      { x: 520, y: 70 },
+      { x: 520, y: 390 },
+      { x: 80, y: 390 },
     ],
-    area_px2: 420 * 330,
+    area_px2: 440 * 320,
     confidence: 0.98,
     provenance: 'observed',
   },
   {
     id: 'R-02',
-    name: 'Primary Bedroom Suite',
+    name: 'Master Bedroom Suite',
     category: 'bedroom',
     polygon: [
-      { x: 520, y: 80 },
-      { x: 720, y: 80 },
-      { x: 720, y: 410 },
-      { x: 520, y: 410 },
+      { x: 520, y: 70 },
+      { x: 920, y: 70 },
+      { x: 920, y: 390 },
+      { x: 520, y: 390 },
     ],
-    area_px2: 200 * 330,
-    confidence: 0.96,
+    area_px2: 400 * 320,
+    confidence: 0.97,
     provenance: 'observed',
   },
   {
     id: 'R-03',
-    name: 'Guest Bedroom & Study',
-    category: 'bedroom',
-    polygon: [
-      { x: 720, y: 80 },
-      { x: 900, y: 80 },
-      { x: 900, y: 410 },
-      { x: 720, y: 410 },
-    ],
-    area_px2: 180 * 330,
-    confidence: 0.94,
-    provenance: 'generated_completion',
-  },
-  {
-    id: 'R-04',
-    name: 'Chef Kitchen & Dining',
+    name: 'Modular Kitchen & Dining',
     category: 'kitchen',
     polygon: [
-      { x: 100, y: 410 },
-      { x: 400, y: 410 },
-      { x: 400, y: 680 },
-      { x: 100, y: 680 },
+      { x: 80, y: 390 },
+      { x: 430, y: 390 },
+      { x: 430, y: 680 },
+      { x: 80, y: 680 },
     ],
-    area_px2: 300 * 270,
+    area_px2: 350 * 290,
     confidence: 0.96,
     provenance: 'observed',
   },
   {
-    id: 'R-05',
-    name: 'Central Foyer & Gallery',
-    category: 'hallway',
+    id: 'R-04',
+    name: 'Guest Bedroom & Study',
+    category: 'bedroom',
     polygon: [
-      { x: 400, y: 410 },
-      { x: 630, y: 410 },
-      { x: 630, y: 680 },
-      { x: 400, y: 680 },
+      { x: 430, y: 390 },
+      { x: 680, y: 390 },
+      { x: 680, y: 680 },
+      { x: 430, y: 680 },
     ],
-    area_px2: 230 * 270,
+    area_px2: 250 * 290,
     confidence: 0.94,
     provenance: 'observed',
   },
   {
-    id: 'R-06',
-    name: 'Full Bath & Wet Suite',
+    id: 'R-05',
+    name: 'Luxury Spa Bathroom',
     category: 'bathroom',
     polygon: [
-      { x: 630, y: 410 },
-      { x: 900, y: 410 },
-      { x: 900, y: 680 },
-      { x: 630, y: 680 },
+      { x: 680, y: 390 },
+      { x: 920, y: 390 },
+      { x: 920, y: 680 },
+      { x: 680, y: 680 },
     ],
-    area_px2: 270 * 270,
-    confidence: 0.95,
+    area_px2: 240 * 290,
+    confidence: 0.96,
     provenance: 'observed',
   },
 ];
@@ -361,15 +481,15 @@ const NORDIC_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'l
 const LOFT_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'length_m'>[] = [
   {
     id: 'R-01',
-    name: 'Primary Bedroom Alcove',
+    name: 'Primary Bedroom Suite',
     category: 'bedroom',
     polygon: [
-      { x: 120, y: 95 },
-      { x: 420, y: 95 },
-      { x: 420, y: 390 },
-      { x: 120, y: 390 },
+      { x: 100, y: 80 },
+      { x: 470, y: 80 },
+      { x: 470, y: 385 },
+      { x: 100, y: 385 },
     ],
-    area_px2: 300 * 295,
+    area_px2: 370 * 305,
     confidence: 0.96,
     provenance: 'observed',
   },
@@ -378,27 +498,27 @@ const LOFT_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'len
     name: 'Open Living Salon',
     category: 'living',
     polygon: [
-      { x: 420, y: 95 },
-      { x: 880, y: 95 },
-      { x: 880, y: 390 },
-      { x: 420, y: 390 },
+      { x: 470, y: 80 },
+      { x: 900, y: 80 },
+      { x: 900, y: 385 },
+      { x: 470, y: 385 },
     ],
-    area_px2: 460 * 295,
+    area_px2: 430 * 305,
     confidence: 0.97,
     provenance: 'observed',
   },
   {
     id: 'R-03',
-    name: 'Kitchen & Dining Island',
+    name: 'Chef Kitchen & Dining',
     category: 'kitchen',
     polygon: [
-      { x: 120, y: 390 },
-      { x: 580, y: 390 },
-      { x: 580, y: 655 },
-      { x: 120, y: 655 },
+      { x: 100, y: 385 },
+      { x: 570, y: 385 },
+      { x: 570, y: 670 },
+      { x: 100, y: 670 },
     ],
-    area_px2: 460 * 265,
-    confidence: 0.95,
+    area_px2: 470 * 285,
+    confidence: 0.96,
     provenance: 'observed',
   },
   {
@@ -406,14 +526,14 @@ const LOFT_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'len
     name: 'Spa Bathroom Suite',
     category: 'bathroom',
     polygon: [
-      { x: 580, y: 390 },
-      { x: 880, y: 390 },
-      { x: 880, y: 655 },
-      { x: 580, y: 655 },
+      { x: 570, y: 385 },
+      { x: 900, y: 385 },
+      { x: 900, y: 670 },
+      { x: 570, y: 670 },
     ],
-    area_px2: 300 * 265,
+    area_px2: 330 * 285,
     confidence: 0.95,
-    provenance: 'generated_completion',
+    provenance: 'observed',
   },
 ];
 
@@ -423,12 +543,12 @@ const SUITE_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'le
     name: 'Executive Lounge & Living',
     category: 'living',
     polygon: [
-      { x: 80, y: 60 },
-      { x: 460, y: 60 },
-      { x: 460, y: 400 },
-      { x: 80, y: 400 },
+      { x: 80, y: 70 },
+      { x: 490, y: 70 },
+      { x: 490, y: 390 },
+      { x: 80, y: 390 },
     ],
-    area_px2: 380 * 340,
+    area_px2: 410 * 320,
     confidence: 0.98,
     provenance: 'observed',
   },
@@ -437,27 +557,27 @@ const SUITE_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'le
     name: 'Master Bedroom Suite',
     category: 'bedroom',
     polygon: [
-      { x: 460, y: 60 },
-      { x: 920, y: 60 },
-      { x: 920, y: 400 },
-      { x: 460, y: 400 },
+      { x: 490, y: 70 },
+      { x: 920, y: 70 },
+      { x: 920, y: 390 },
+      { x: 490, y: 390 },
     ],
-    area_px2: 460 * 340,
+    area_px2: 430 * 320,
     confidence: 0.97,
     provenance: 'observed',
   },
   {
     id: 'R-03',
-    name: 'Chef Kitchen & Bar',
+    name: 'Modular Kitchen & Bar',
     category: 'kitchen',
     polygon: [
-      { x: 80, y: 400 },
-      { x: 380, y: 400 },
-      { x: 380, y: 690 },
-      { x: 80, y: 690 },
+      { x: 80, y: 390 },
+      { x: 420, y: 390 },
+      { x: 420, y: 680 },
+      { x: 80, y: 680 },
     ],
-    area_px2: 300 * 290,
-    confidence: 0.94,
+    area_px2: 340 * 290,
+    confidence: 0.95,
     provenance: 'observed',
   },
   {
@@ -465,27 +585,27 @@ const SUITE_ROOMS: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'le
     name: 'Private Study Office',
     category: 'office',
     polygon: [
-      { x: 380, y: 400 },
-      { x: 650, y: 400 },
-      { x: 650, y: 690 },
-      { x: 380, y: 690 },
+      { x: 420, y: 390 },
+      { x: 670, y: 390 },
+      { x: 670, y: 680 },
+      { x: 420, y: 680 },
     ],
-    area_px2: 270 * 290,
-    confidence: 0.95,
-    provenance: 'generated_completion',
+    area_px2: 250 * 290,
+    confidence: 0.94,
+    provenance: 'observed',
   },
   {
     id: 'R-05',
     name: 'En-Suite Bathroom',
     category: 'bathroom',
     polygon: [
-      { x: 650, y: 400 },
-      { x: 920, y: 400 },
-      { x: 920, y: 690 },
-      { x: 650, y: 690 },
+      { x: 670, y: 390 },
+      { x: 920, y: 390 },
+      { x: 920, y: 680 },
+      { x: 670, y: 680 },
     ],
-    area_px2: 270 * 290,
-    confidence: 0.93,
+    area_px2: 250 * 290,
+    confidence: 0.95,
     provenance: 'observed',
   },
 ];
@@ -494,135 +614,104 @@ export const BLUEPRINT_PRESETS: BlueprintPreset[] = [
   {
     id: 'nordic-courtyard-2br',
     name: '2-Bed Residence',
-    subtitle: '94.8 m² · 2 Bedrooms, Full Bath, Kitchen & Salon',
+    subtitle: '99.4 m² · 2 Bedrooms, Spa Bath, Kitchen & Living',
     width_px: 1000,
     height_px: 750,
-    ocr_dimension_text: '11.20 m × 8.40 m',
+    ocr_dimension_text: '11.76 m × 8.54 m',
+    reference_width_m: 11.76,
     default_m_per_px: 0.014,
+    has_ground_truth: true,
     walls: [
-      // Exterior perimeter
-      { id: 'W-01', start: { x: 100, y: 80 }, end: { x: 900, y: 80 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-02', start: { x: 900, y: 80 }, end: { x: 900, y: 680 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'generated_completion' },
-      { id: 'W-03', start: { x: 900, y: 680 }, end: { x: 100, y: 680 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-04', start: { x: 100, y: 680 }, end: { x: 100, y: 80 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      // Interior room partitions
-      { id: 'W-05', start: { x: 520, y: 80 }, end: { x: 520, y: 410 }, thickness_px: 13, is_exterior: false, confidence: 0.97, provenance: 'observed' },
-      { id: 'W-06', start: { x: 100, y: 410 }, end: { x: 900, y: 410 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
-      { id: 'W-07', start: { x: 400, y: 410 }, end: { x: 400, y: 680 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
-      { id: 'W-08', start: { x: 630, y: 410 }, end: { x: 630, y: 680 }, thickness_px: 13, is_exterior: false, confidence: 0.94, provenance: 'observed' },
-      { id: 'W-09', start: { x: 720, y: 80 }, end: { x: 720, y: 410 }, thickness_px: 12, is_exterior: false, confidence: 0.91, provenance: 'generated_completion' },
+      { id: 'W-01', start: { x: 80, y: 70 }, end: { x: 920, y: 70 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-02', start: { x: 920, y: 70 }, end: { x: 920, y: 680 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'observed' },
+      { id: 'W-03', start: { x: 920, y: 680 }, end: { x: 80, y: 680 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-04', start: { x: 80, y: 680 }, end: { x: 80, y: 70 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-05', start: { x: 520, y: 70 }, end: { x: 520, y: 390 }, thickness_px: 13, is_exterior: false, confidence: 0.97, provenance: 'observed' },
+      { id: 'W-06', start: { x: 80, y: 390 }, end: { x: 920, y: 390 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
+      { id: 'W-07', start: { x: 430, y: 390 }, end: { x: 430, y: 680 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
+      { id: 'W-08', start: { x: 680, y: 390 }, end: { x: 680, y: 680 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
     ],
     openings: [
-      { id: 'D-01', kind: 'door', wall_id: 'W-03', position_t: 0.49, width_px: 66, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.97, provenance: 'observed' },
-      { id: 'D-02', kind: 'door', wall_id: 'W-06', position_t: 0.24, width_px: 64, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.95, provenance: 'observed' },
-      { id: 'D-03', kind: 'door', wall_id: 'W-06', position_t: 0.64, width_px: 64, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.94, provenance: 'observed' },
-      { id: 'D-04', kind: 'door', wall_id: 'W-06', position_t: 0.88, width_px: 62, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.92, provenance: 'generated_completion' },
-      { id: 'D-05', kind: 'door', wall_id: 'W-07', position_t: 0.52, width_px: 60, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.93, provenance: 'observed' },
-      { id: 'D-06', kind: 'door', wall_id: 'W-08', position_t: 0.50, width_px: 58, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.91, provenance: 'observed' },
-      { id: 'WIN-01', kind: 'window', wall_id: 'W-01', position_t: 0.25, width_px: 170, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.97, provenance: 'observed' },
-      { id: 'WIN-02', kind: 'window', wall_id: 'W-01', position_t: 0.64, width_px: 110, sill_height_m: 0.9, head_height_m: 2.15, confidence: 0.95, provenance: 'observed' },
-      { id: 'WIN-03', kind: 'window', wall_id: 'W-01', position_t: 0.88, width_px: 110, sill_height_m: 0.9, head_height_m: 2.15, confidence: 0.94, provenance: 'generated_completion' },
-      { id: 'WIN-04', kind: 'window', wall_id: 'W-04', position_t: 0.72, width_px: 140, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.96, provenance: 'observed' },
-      { id: 'WIN-05', kind: 'window', wall_id: 'W-02', position_t: 0.75, width_px: 120, sill_height_m: 1.0, head_height_m: 2.1, confidence: 0.92, provenance: 'generated_completion' },
-      { id: 'WIN-06', kind: 'window', wall_id: 'W-03', position_t: 0.82, width_px: 130, sill_height_m: 0.95, head_height_m: 2.1, confidence: 0.93, provenance: 'observed' },
+      { id: 'D-01', kind: 'door', wall_id: 'W-03', position_t: 0.44, width_px: 64, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.97, provenance: 'observed' },
+      { id: 'D-02', kind: 'door', wall_id: 'W-06', position_t: 0.44, width_px: 64, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.96, provenance: 'observed' },
+      { id: 'D-03', kind: 'door', wall_id: 'W-06', position_t: 0.62, width_px: 64, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.95, provenance: 'observed' },
+      { id: 'D-04', kind: 'door', wall_id: 'W-06', position_t: 0.80, width_px: 62, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.94, provenance: 'observed' },
+      { id: 'D-05', kind: 'door', wall_id: 'W-07', position_t: 0.32, width_px: 62, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.94, provenance: 'observed' },
+      { id: 'WIN-01', kind: 'window', wall_id: 'W-01', position_t: 0.26, width_px: 150, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.97, provenance: 'observed' },
+      { id: 'WIN-02', kind: 'window', wall_id: 'W-01', position_t: 0.74, width_px: 150, sill_height_m: 0.9, head_height_m: 2.15, confidence: 0.96, provenance: 'observed' },
+      { id: 'WIN-03', kind: 'window', wall_id: 'W-04', position_t: 0.26, width_px: 130, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.96, provenance: 'observed' },
+      { id: 'WIN-04', kind: 'window', wall_id: 'W-02', position_t: 0.26, width_px: 130, sill_height_m: 0.9, head_height_m: 2.15, confidence: 0.95, provenance: 'observed' },
     ],
-    rooms: NORDIC_ROOMS,
-    furniture: synthesizeFurnitureForRooms(NORDIC_ROOMS, 0.014),
-    warnings: [
-      {
-        code: 'PS06_EPISTEMIC_COMPLETION',
-        severity: 'info',
-        stage: 'build_model',
-        element_id: 'W-09',
-        message: 'East wing partition W-09 & Guest Bedroom fixtures completed via blueprint-guided generative prior (marked as Generated Completion).',
-      },
-    ],
+    rooms: RESIDENCE_2BHK_ROOMS,
+    furniture: synthesizeFurnitureForRooms(RESIDENCE_2BHK_ROOMS, 0.014),
+    warnings: [],
   },
   {
     id: 'minimalist-urban-loft',
     name: '1-Bed Urban Loft',
-    subtitle: '68.4 m² · Bedroom, Spa Bath, Kitchen & Salon',
+    subtitle: '84.5 m² · Bedroom, Spa Bath, Kitchen & Salon',
     width_px: 1000,
     height_px: 750,
-    ocr_dimension_text: '9.60 m × 7.12 m',
-    default_m_per_px: 0.0126,
+    ocr_dimension_text: '10.80 m × 7.96 m',
+    reference_width_m: 10.8,
+    default_m_per_px: 0.0135,
+    has_ground_truth: true,
     walls: [
-      { id: 'W-01', start: { x: 120, y: 95 }, end: { x: 880, y: 95 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-02', start: { x: 880, y: 95 }, end: { x: 880, y: 655 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'observed' },
-      { id: 'W-03', start: { x: 880, y: 655 }, end: { x: 120, y: 655 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-04', start: { x: 120, y: 655 }, end: { x: 120, y: 95 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'observed' },
-      { id: 'W-05', start: { x: 420, y: 95 }, end: { x: 420, y: 390 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
-      { id: 'W-06', start: { x: 120, y: 390 }, end: { x: 880, y: 390 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
-      { id: 'W-07', start: { x: 580, y: 390 }, end: { x: 580, y: 655 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'generated_completion' },
+      { id: 'W-01', start: { x: 100, y: 80 }, end: { x: 900, y: 80 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-02', start: { x: 900, y: 80 }, end: { x: 900, y: 670 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'observed' },
+      { id: 'W-03', start: { x: 900, y: 670 }, end: { x: 100, y: 670 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-04', start: { x: 100, y: 670 }, end: { x: 100, y: 80 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'observed' },
+      { id: 'W-05', start: { x: 470, y: 80 }, end: { x: 470, y: 385 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
+      { id: 'W-06', start: { x: 100, y: 385 }, end: { x: 900, y: 385 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
+      { id: 'W-07', start: { x: 570, y: 385 }, end: { x: 570, y: 670 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
     ],
     openings: [
-      { id: 'D-01', kind: 'door', wall_id: 'W-03', position_t: 0.55, width_px: 72, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.2, confidence: 0.96, provenance: 'observed' },
-      { id: 'D-02', kind: 'door', wall_id: 'W-05', position_t: 0.55, width_px: 68, swing_direction: 'outward-left', sill_height_m: 0, head_height_m: 2.2, confidence: 0.93, provenance: 'observed' },
-      { id: 'D-03', kind: 'door', wall_id: 'W-07', position_t: 0.48, width_px: 66, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.94, provenance: 'generated_completion' },
-      { id: 'WIN-01', kind: 'window', wall_id: 'W-04', position_t: 0.30, width_px: 160, sill_height_m: 0.6, head_height_m: 2.3, confidence: 0.97, provenance: 'observed' },
-      { id: 'WIN-02', kind: 'window', wall_id: 'W-01', position_t: 0.68, width_px: 220, sill_height_m: 0.75, head_height_m: 2.3, confidence: 0.98, provenance: 'observed' },
-      { id: 'WIN-03', kind: 'window', wall_id: 'W-02', position_t: 0.28, width_px: 150, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.94, provenance: 'observed' },
+      { id: 'D-01', kind: 'door', wall_id: 'W-03', position_t: 0.56, width_px: 66, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.15, confidence: 0.96, provenance: 'observed' },
+      { id: 'D-02', kind: 'door', wall_id: 'W-05', position_t: 0.72, width_px: 64, swing_direction: 'outward-left', sill_height_m: 0, head_height_m: 2.15, confidence: 0.95, provenance: 'observed' },
+      { id: 'D-03', kind: 'door', wall_id: 'W-07', position_t: 0.35, width_px: 64, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.94, provenance: 'observed' },
+      { id: 'WIN-01', kind: 'window', wall_id: 'W-04', position_t: 0.25, width_px: 140, sill_height_m: 0.75, head_height_m: 2.2, confidence: 0.97, provenance: 'observed' },
+      { id: 'WIN-02', kind: 'window', wall_id: 'W-01', position_t: 0.72, width_px: 180, sill_height_m: 0.8, head_height_m: 2.2, confidence: 0.98, provenance: 'observed' },
+      { id: 'WIN-03', kind: 'window', wall_id: 'W-02', position_t: 0.26, width_px: 140, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.95, provenance: 'observed' },
     ],
     rooms: LOFT_ROOMS,
-    furniture: synthesizeFurnitureForRooms(LOFT_ROOMS, 0.0126),
-    warnings: [
-      {
-        code: 'UNSEEN_BATH_COMPLETED',
-        severity: 'info',
-        stage: 'build_model',
-        element_id: 'R-04',
-        message: 'Spa Bathroom wet-core fixtures (Bathtub, Vanity, WC) reconstructed via semantic room prior.',
-      },
-    ],
+    furniture: synthesizeFurnitureForRooms(LOFT_ROOMS, 0.0135),
+    warnings: [],
   },
   {
-    id: 'executive-corner-hub',
-    name: 'Master Suite & Study',
-    subtitle: '126.0 m² · Master Bedroom, Study, Bath, Kitchen & Lounge',
+    id: 'courtyard-office-suite',
+    name: 'Executive Residence',
+    subtitle: '98.5 m² · Bedroom, Study, Bath, Kitchen & Lounge',
     width_px: 1000,
     height_px: 750,
-    ocr_dimension_text: '12.60 m × 9.45 m',
-    default_m_per_px: 0.015,
+    ocr_dimension_text: '11.50 m × 8.36 m',
+    reference_width_m: 11.5,
+    default_m_per_px: 0.0137,
+    has_ground_truth: true,
     walls: [
-      { id: 'W-01', start: { x: 80, y: 60 }, end: { x: 920, y: 60 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-02', start: { x: 920, y: 60 }, end: { x: 920, y: 690 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-03', start: { x: 920, y: 690 }, end: { x: 80, y: 690 }, thickness_px: 18, is_exterior: true, confidence: 0.98, provenance: 'observed' },
-      { id: 'W-04', start: { x: 80, y: 690 }, end: { x: 80, y: 60 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
-      { id: 'W-05', start: { x: 460, y: 60 }, end: { x: 460, y: 400 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
-      { id: 'W-06', start: { x: 80, y: 400 }, end: { x: 920, y: 400 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
-      { id: 'W-07', start: { x: 380, y: 400 }, end: { x: 380, y: 690 }, thickness_px: 13, is_exterior: false, confidence: 0.93, provenance: 'observed' },
-      { id: 'W-08', start: { x: 650, y: 400 }, end: { x: 650, y: 690 }, thickness_px: 13, is_exterior: false, confidence: 0.94, provenance: 'generated_completion' },
+      { id: 'W-01', start: { x: 80, y: 70 }, end: { x: 920, y: 70 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-02', start: { x: 920, y: 70 }, end: { x: 920, y: 680 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-03', start: { x: 920, y: 680 }, end: { x: 80, y: 680 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-04', start: { x: 80, y: 680 }, end: { x: 80, y: 70 }, thickness_px: 18, is_exterior: true, confidence: 0.99, provenance: 'observed' },
+      { id: 'W-05', start: { x: 490, y: 70 }, end: { x: 490, y: 390 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
+      { id: 'W-06', start: { x: 80, y: 390 }, end: { x: 920, y: 390 }, thickness_px: 13, is_exterior: false, confidence: 0.96, provenance: 'observed' },
+      { id: 'W-07', start: { x: 420, y: 390 }, end: { x: 420, y: 680 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
+      { id: 'W-08', start: { x: 670, y: 390 }, end: { x: 670, y: 680 }, thickness_px: 13, is_exterior: false, confidence: 0.95, provenance: 'observed' },
     ],
     openings: [
-      { id: 'D-01', kind: 'door', wall_id: 'W-03', position_t: 0.50, width_px: 64, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.2, confidence: 0.97, provenance: 'observed' },
-      { id: 'D-02', kind: 'door', wall_id: 'W-06', position_t: 0.22, width_px: 62, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.2, confidence: 0.95, provenance: 'observed' },
-      { id: 'D-03', kind: 'door', wall_id: 'W-06', position_t: 0.72, width_px: 62, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.2, confidence: 0.95, provenance: 'observed' },
-      { id: 'D-04', kind: 'door', wall_id: 'W-07', position_t: 0.50, width_px: 60, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.92, provenance: 'observed' },
-      { id: 'D-05', kind: 'door', wall_id: 'W-08', position_t: 0.50, width_px: 60, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.93, provenance: 'generated_completion' },
-      { id: 'WIN-01', kind: 'window', wall_id: 'W-01', position_t: 0.23, width_px: 200, sill_height_m: 0.5, head_height_m: 2.4, confidence: 0.98, provenance: 'observed' },
-      { id: 'WIN-02', kind: 'window', wall_id: 'W-01', position_t: 0.73, width_px: 220, sill_height_m: 0.5, head_height_m: 2.4, confidence: 0.98, provenance: 'observed' },
-      { id: 'WIN-03', kind: 'window', wall_id: 'W-02', position_t: 0.28, width_px: 160, sill_height_m: 0.5, head_height_m: 2.4, confidence: 0.96, provenance: 'observed' },
-      { id: 'WIN-04', kind: 'window', wall_id: 'W-02', position_t: 0.75, width_px: 140, sill_height_m: 0.85, head_height_m: 2.3, confidence: 0.94, provenance: 'observed' },
+      { id: 'D-01', kind: 'door', wall_id: 'W-03', position_t: 0.46, width_px: 66, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.98, provenance: 'observed' },
+      { id: 'D-02', kind: 'door', wall_id: 'W-06', position_t: 0.42, width_px: 64, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.96, provenance: 'observed' },
+      { id: 'D-03', kind: 'door', wall_id: 'W-06', position_t: 0.62, width_px: 64, swing_direction: 'inward-left', sill_height_m: 0, head_height_m: 2.1, confidence: 0.95, provenance: 'observed' },
+      { id: 'D-04', kind: 'door', wall_id: 'W-06', position_t: 0.80, width_px: 62, swing_direction: 'inward-right', sill_height_m: 0, head_height_m: 2.1, confidence: 0.95, provenance: 'observed' },
+      { id: 'WIN-01', kind: 'window', wall_id: 'W-01', position_t: 0.25, width_px: 160, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.97, provenance: 'observed' },
+      { id: 'WIN-02', kind: 'window', wall_id: 'W-01', position_t: 0.74, width_px: 160, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.97, provenance: 'observed' },
+      { id: 'WIN-03', kind: 'window', wall_id: 'W-02', position_t: 0.26, width_px: 140, sill_height_m: 0.85, head_height_m: 2.2, confidence: 0.95, provenance: 'observed' },
     ],
     rooms: SUITE_ROOMS,
-    furniture: synthesizeFurnitureForRooms(SUITE_ROOMS, 0.015),
-    warnings: [
-      {
-        code: 'CURTAIN_WALL_GLAZING',
-        severity: 'info',
-        stage: 'build_model',
-        element_id: 'WIN-02',
-        message: 'North elevation glazing WIN-01 / WIN-02 spans >3.0m; architectural mullions inserted.',
-      },
-    ],
+    furniture: synthesizeFurnitureForRooms(SUITE_ROOMS, 0.0137),
+    warnings: [],
   },
 ];
 
-/**
- * Renders a crisp architectural 2D blueprint PNG data URL on an offscreen canvas,
- * including 2D CAD furniture symbols (beds, pillows, bathtubs, toilets, sofas, tables)
- * so preset plans look like complete architectural drawings.
- */
 export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
   const canvas = document.createElement('canvas');
   canvas.width = preset.width_px;
@@ -630,27 +719,24 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
 
-  // Architectural vellum paper background
   ctx.fillStyle = '#F6F5F0';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Subtle millimeter architectural drafting grid
-  ctx.strokeStyle = 'rgba(15, 23, 42, 0.055)';
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.05)';
   ctx.lineWidth = 1;
-  for (let x = 0; x <= canvas.width; x += 25) {
+  for (let x = 0; x < canvas.width; x += 25) {
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x, canvas.height);
     ctx.stroke();
   }
-  for (let y = 0; y <= canvas.height; y += 25) {
+  for (let y = 0; y < canvas.height; y += 25) {
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(canvas.width, y);
     ctx.stroke();
   }
 
-  // Room subtle fills
   for (const room of preset.rooms) {
     if (room.polygon.length < 3) continue;
     ctx.save();
@@ -662,16 +748,16 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
     ctx.closePath();
     ctx.fillStyle =
       room.category === 'bathroom'
-        ? 'rgba(148, 163, 184, 0.18)'
+        ? 'rgba(148, 163, 184, 0.16)'
         : room.category === 'kitchen'
-        ? 'rgba(203, 213, 225, 0.22)'
-        : 'rgba(255, 255, 255, 0.65)';
+        ? 'rgba(203, 213, 225, 0.2)'
+        : 'rgba(255, 255, 255, 0.68)';
     ctx.fill();
     ctx.restore();
   }
 
-  // Draw 2D CAD symbols for furniture & bathroom/kitchen fixtures
-  for (const item of preset.furniture) {
+  // Draw observed furniture on the physical 2D paper blueprint
+  for (const item of preset.furniture.filter((f) => f.provenance === 'observed')) {
     ctx.save();
     ctx.translate(item.center_px.x, item.center_px.y);
     ctx.rotate((item.rotation_deg * Math.PI) / 180);
@@ -683,10 +769,8 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
     ctx.lineWidth = 1.4;
 
     if (item.kind === 'bed') {
-      // Mattress outline + headboard + two pillows + folded duvet line
       ctx.fillRect(-hw, -hd, item.width_px, item.depth_px);
       ctx.strokeRect(-hw, -hd, item.width_px, item.depth_px);
-      // Pillows
       ctx.fillStyle = '#FFFFFF';
       const pw = item.width_px * 0.36;
       const pd = item.depth_px * 0.18;
@@ -694,21 +778,11 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
       ctx.strokeRect(-hw + 8, -hd + 8, pw, pd);
       ctx.fillRect(hw - pw - 8, -hd + 8, pw, pd);
       ctx.strokeRect(hw - pw - 8, -hd + 8, pw, pd);
-      // Duvet fold line
       ctx.beginPath();
       ctx.moveTo(-hw, -hd + pd + 16);
       ctx.lineTo(hw, -hd + pd + 16);
       ctx.stroke();
-    } else if (item.kind === 'bathtub') {
-      ctx.fillRect(-hw, -hd, item.width_px, item.depth_px);
-      ctx.strokeRect(-hw, -hd, item.width_px, item.depth_px);
-      ctx.fillStyle = '#F8FAFC';
-      ctx.beginPath();
-      ctx.roundRect(-hw + 6, -hd + 6, item.width_px - 12, item.depth_px - 12, 10);
-      ctx.fill();
-      ctx.stroke();
     } else if (item.kind === 'toilet') {
-      // Tank + oval bowl
       ctx.fillRect(-hw, -hd, item.width_px, item.depth_px * 0.32);
       ctx.strokeRect(-hw, -hd, item.width_px, item.depth_px * 0.32);
       ctx.beginPath();
@@ -722,7 +796,6 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
     ctx.restore();
   }
 
-  // Draw solid architectural walls
   for (const wall of preset.walls) {
     ctx.save();
     ctx.strokeStyle = '#0F172A';
@@ -735,7 +808,6 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
     ctx.restore();
   }
 
-  // Draw openings (doors with swing arc, windows with casement double lines)
   for (const op of preset.openings) {
     const wall = preset.walls.find((w) => w.id === op.wall_id);
     if (!wall) continue;
@@ -773,21 +845,11 @@ export function renderPresetBlueprintDataUrl(preset: BlueprintPreset): string {
       ctx.lineTo(p2x - nx * 3, p2y - ny * 3);
       ctx.stroke();
     } else {
-      ctx.strokeStyle = '#1E293B';
-      ctx.lineWidth = 2;
-      const leafEndX = p1x + nx * op.width_px;
-      const leafEndY = p1y + ny * op.width_px;
+      ctx.strokeStyle = '#78350F';
+      ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(p1x, p1y);
-      ctx.lineTo(leafEndX, leafEndY);
-      ctx.stroke();
-
-      ctx.setLineDash([4, 4]);
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      const startAngle = Math.atan2(p2y - p1y, p2x - p1x);
-      const endAngle = Math.atan2(leafEndY - p1y, leafEndX - p1x);
-      ctx.arc(p1x, p1y, op.width_px, startAngle, endAngle, false);
+      ctx.lineTo(p2x, p2y);
       ctx.stroke();
     }
     ctx.restore();

@@ -10,7 +10,34 @@ export type RoomCategory =
   | 'utility'
   | 'balcony';
 
-export type EpistemicProvenance = 'observed' | 'generated_completion';
+/**
+ * Reconstruction Provenance categories:
+ * - 'observed': AI-detected / CV-detected geometry from floor plan
+ * - 'user_corrected': Geometry confirmed, adjusted, or added by the user
+ * - 'generated_completion': Automatically inferred or generated elements
+ */
+export type EpistemicProvenance = 'observed' | 'user_corrected' | 'generated_completion';
+
+/**
+ * Deterministic AI + Geometric Confidence tier:
+ * - 'high': Green — High confidence & passes all geometric checks
+ * - 'uncertain': Amber — Uncertain or needs human review
+ * - 'invalid': Red — Missing, disconnected, overlapping, or geometrically inconsistent
+ */
+export type ConfidenceStatus = 'high' | 'uncertain' | 'invalid';
+
+export type WorkflowStepId =
+  | 'upload'
+  | 'detect'
+  | 'review_confidence'
+  | 'correct'
+  | 'validate'
+  | 'explore_3d'
+  | 'report';
+
+export type EditorToolMode = 'select' | 'add_wall' | 'add_door' | 'add_window';
+
+export type OverlayColorMode = 'standard' | 'confidence' | 'provenance';
 
 export type FurnitureCategory =
   | 'bed'
@@ -41,6 +68,8 @@ export interface WallSegment {
   is_exterior: boolean;
   confidence: number;
   provenance?: EpistemicProvenance;
+  confidence_status?: ConfidenceStatus;
+  status_reason?: string;
 }
 
 export interface OpeningElement {
@@ -55,6 +84,8 @@ export interface OpeningElement {
   head_height_m: number;
   confidence: number;
   provenance?: EpistemicProvenance;
+  confidence_status?: ConfidenceStatus;
+  status_reason?: string;
 }
 
 export interface FurnitureElement {
@@ -62,16 +93,15 @@ export interface FurnitureElement {
   room_id: string;
   kind: FurnitureCategory;
   label: string;
-  /** Center position in blueprint pixel coordinates */
   center_px: Point2D;
-  /** Width & depth in blueprint pixels */
   width_px: number;
   depth_px: number;
   height_m: number;
   rotation_deg: number;
   confidence: number;
-  /** PS06 Novelty: Whether directly observed in blueprint/video or plausibly completed */
   provenance: EpistemicProvenance;
+  confidence_status?: ConfidenceStatus;
+  status_reason?: string;
 }
 
 export interface RoomPolygon {
@@ -86,6 +116,8 @@ export interface RoomPolygon {
   length_m: number;
   confidence: number;
   provenance?: EpistemicProvenance;
+  confidence_status?: ConfidenceStatus;
+  status_reason?: string;
 }
 
 export interface ScaleEstimation {
@@ -94,6 +126,30 @@ export interface ScaleEstimation {
   confidence: number;
   reference_label: string;
   detected_dimension_text?: string;
+}
+
+export type ValidationCheckCategory =
+  | 'disconnected_walls'
+  | 'invalid_room_boundaries'
+  | 'overlapping_geometry'
+  | 'inconsistent_dimensions'
+  | 'unassociated_openings';
+
+export interface ValidationIssue {
+  id: string;
+  category: ValidationCheckCategory;
+  severity: 'warning' | 'critical';
+  element_id: string;
+  element_type: 'wall' | 'opening' | 'room';
+  title: string;
+  description: string;
+  suggestion: string;
+  fix_action?:
+    | { type: 'snap_wall_endpoint'; wall_id: string; endpoint: 'start' | 'end'; target: Point2D }
+    | { type: 'orthogonalize_wall'; wall_id: string }
+    | { type: 'remove_duplicate_wall'; wall_id: string }
+    | { type: 'clamp_opening'; opening_id: string; wall_id: string; position_t: number; width_px: number }
+    | { type: 'close_room_boundary'; room_id: string };
 }
 
 export interface PipelineWarning {
@@ -117,11 +173,9 @@ export interface PipelineConfig {
   include_openings_3d: boolean;
   include_furniture_3d: boolean;
   show_generated_completion: boolean;
-  /** PS06 Novelty: Visual mode separating Observed (Emerald/Cyan) vs AI-Completed (Amber) geometry */
-  material_theme: 'studio' | 'epistemic_confidence' | 'blueprint';
-  /** PS06 Research Contribution: Ablation mode comparing Baseline vs Full FloorForge */
+  material_theme: 'studio' | 'confidence_overlay' | 'provenance_overlay' | 'blueprint';
+  overlay_2d_mode: OverlayColorMode;
   ablation_mode: AblationMode;
-  /** PS06 Mode A (Floor Plan) vs Mode B (Blueprint-Guided Video Completion with Camera Frustum) */
   input_mode: 'mode_a_blueprint' | 'mode_b_video_fusion';
 }
 
@@ -137,6 +191,7 @@ export interface WallMeshSegment3D {
   segment_type: 'full_wall' | 'lintel' | 'sill';
   provenance: EpistemicProvenance;
   confidence: number;
+  confidence_status: ConfidenceStatus;
 }
 
 export interface OpeningMesh3D {
@@ -149,6 +204,7 @@ export interface OpeningMesh3D {
   height_m: number;
   thickness_m: number;
   provenance: EpistemicProvenance;
+  confidence_status: ConfidenceStatus;
 }
 
 export interface FurnitureMesh3D {
@@ -163,6 +219,7 @@ export interface FurnitureMesh3D {
   rotation_rad: number;
   provenance: EpistemicProvenance;
   confidence: number;
+  confidence_status: ConfidenceStatus;
 }
 
 export interface RoomSlabMesh3D {
@@ -174,6 +231,32 @@ export interface RoomSlabMesh3D {
   area_m2: number;
   dimensions_label: string;
   provenance: EpistemicProvenance;
+  confidence_status: ConfidenceStatus;
+}
+
+export interface ProvenanceReport {
+  ai_detected_count: number;
+  user_corrected_count: number;
+  inferred_completion_count: number;
+  unresolved_count: number;
+  high_confidence_count: number;
+  uncertain_count: number;
+  invalid_count: number;
+}
+
+export interface EvaluationMetrics {
+  total_walls: number;
+  total_rooms: number;
+  total_openings: number;
+  uncertain_elements_count: number;
+  invalid_elements_count: number;
+  user_corrections_count: number;
+  validation_checks_passed: number;
+  validation_checks_total: number;
+  dimension_error_m: number | null;
+  dimension_error_status: string;
+  layout_iou: number | null;
+  layout_iou_status: string;
 }
 
 export interface Built3DModelDescriptor {
@@ -190,13 +273,9 @@ export interface Built3DModelDescriptor {
   room_slabs: RoomSlabMesh3D[];
   total_floor_area_m2: number;
   total_wall_linear_m: number;
-  epistemic_stats: {
-    observed_count: number;
-    completed_count: number;
-    observed_ratio_pct: number;
-    layout_iou_vs_baseline: number;
-    dimension_error_cm: number;
-  };
+  provenance_report: ProvenanceReport;
+  evaluation_metrics: EvaluationMetrics;
+  validation_issues: ValidationIssue[];
 }
 
 export interface FloorPlanPipelineResult {
@@ -223,10 +302,17 @@ export interface BlueprintPreset {
   width_px: number;
   height_px: number;
   ocr_dimension_text: string;
+  reference_width_m: number;
   default_m_per_px: number;
+  has_ground_truth: boolean;
   walls: WallSegment[];
   openings: OpeningElement[];
   furniture: FurnitureElement[];
   rooms: Omit<RoomPolygon, 'area_m2' | 'perimeter_m' | 'width_m' | 'length_m'>[];
   warnings: PipelineWarning[];
+}
+
+export interface SelectedElementRef {
+  kind: 'wall' | 'opening' | 'room' | 'furniture';
+  id: string;
 }

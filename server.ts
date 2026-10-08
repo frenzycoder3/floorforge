@@ -48,7 +48,11 @@ app.get('/api/fastapi-source', (_req, res) => {
 
 app.post('/api/pipeline/analyze', async (req, res) => {
   try {
-    const { imageBase64, mimeType, imageWidth = 1000, imageHeight = 750, blueprintName = 'Uploaded Plan' } = req.body;
+    const {
+      imageBase64,
+      mimeType,
+      blueprintName = 'Uploaded Floor Plan',
+    } = req.body;
 
     if (!imageBase64) {
       res.status(400).json({ error: 'Missing imageBase64 payload' });
@@ -59,24 +63,28 @@ app.post('/api/pipeline/analyze', async (req, res) => {
     if (!ai) {
       res.status(200).json({
         fallbackToMock: true,
-        reason: 'GEMINI_API_KEY not configured; using fast local multi-room + furniture pipeline.',
+        reason: 'GEMINI_API_KEY not configured; using local computer-vision contour detector.',
       });
       return;
     }
 
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
 
-    const prompt = `You are FloorForge (HNX26EPS06), a 2D floor-plan to 3D scene & furniture reconstruction engine.
-Analyze this floor-plan image (coordinates: X from 0 to ${imageWidth}, Y from 0 to ${imageHeight}, top-left is 0,0).
-CRITICAL REQUIREMENTS:
-1. Detect BOTH the exterior perimeter walls AND all interior room partition walls (separating bedrooms, bathrooms, kitchen, living room, hallway). Do NOT return only outer borders.
-2. Detect doors and windows along walls.
-3. Detect all enclosed rooms ("living", "bedroom", "kitchen", "bathroom", "hallway", "office", "balcony") as 4-point polygons.
-4. Detect or plausibly complete interior furniture and bathroom/kitchen fixtures ("bed", "nightstand", "wardrobe", "sofa", "coffee_table", "tv_stand", "dining_table", "kitchen_counter", "fridge", "bathtub", "toilet", "sink_vanity", "desk") inside each room, marking provenance as "observed" if drawn on the plan or "generated_completion" if inferred from room semantics.
-5. Estimate scale (meters_per_pixel).`;
+    // Use Gemini's native 0..1000 normalized spatial coordinate system for high geometric accuracy
+    const prompt = `Analyze this 2D architectural floor-plan image with high spatial precision.
+All coordinates MUST use a normalized 0 to 1000 scale where (x=0, y=0) is top-left and (x=1000, y=1000) is bottom-right.
+
+STRICT ACCURACY RULES:
+1. WALLS: Detect all visible exterior perimeter walls and interior room partition walls. Return each wall segment with start (x1, y1) and end (x2, y2) in 0..1000 coordinates, and is_exterior (true for outer boundary walls, false for interior partition walls).
+2. ROOMS: Detect each enclosed room or zone visible in the floor plan. Return its bounding box (xmin, ymin, xmax, ymax) in 0..1000 coordinates, its exact text label if written on the plan (or accurate room name like "Bedroom", "Bathroom", "Kitchen", "Living Room", "Hallway", "Balcony"), and category ("living", "bedroom", "kitchen", "bathroom", "hallway", "office", "utility", "balcony").
+3. DOORS & WINDOWS: Return visible doors and windows with their center (cx, cy) and span width_norm in 0..1000 coordinates.
+4. FURNITURE & FIXTURES (STRICT GROUNDING): ONLY return furniture or plumbing fixtures that are ACTUALLY DRAWN in this floor-plan image (such as a drawn bed, sofa, dining table, toilet, bathtub, sink, kitchen stove/counter, desk, or wardrobe).
+   - If a room has NO furniture drawn inside it on the image, do NOT invent any furniture for that room!
+   - For each drawn object visible in the image, return its exact bounding box (xmin, ymin, xmax, ymax) in 0..1000 coordinates, its kind ("bed", "nightstand", "wardrobe", "sofa", "coffee_table", "tv_stand", "dining_table", "kitchen_counter", "fridge", "bathtub", "toilet", "sink_vanity", "shower", "desk"), and orientation rotation_deg (0, 90, 180, or 270).
+5. SCALE: Read any dimension numbers printed on the plan to estimate total_width_meters of the floor plan (default to 11.0 if no numbers are printed).`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           {
@@ -90,42 +98,25 @@ CRITICAL REQUIREMENTS:
       },
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        temperature: 0.1,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            total_width_meters: { type: Type.NUMBER },
+            detected_dimension_text: { type: Type.STRING },
             walls: {
               type: Type.ARRAY,
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  id: { type: Type.STRING },
-                  startX: { type: Type.NUMBER },
-                  startY: { type: Type.NUMBER },
-                  endX: { type: Type.NUMBER },
-                  endY: { type: Type.NUMBER },
-                  thickness_px: { type: Type.NUMBER },
+                  x1: { type: Type.NUMBER },
+                  y1: { type: Type.NUMBER },
+                  x2: { type: Type.NUMBER },
+                  y2: { type: Type.NUMBER },
                   is_exterior: { type: Type.BOOLEAN },
-                  confidence: { type: Type.NUMBER },
-                  provenance: { type: Type.STRING },
                 },
-                required: ['id', 'startX', 'startY', 'endX', 'endY', 'thickness_px', 'is_exterior', 'confidence'],
-              },
-            },
-            openings: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  kind: { type: Type.STRING },
-                  wall_id: { type: Type.STRING },
-                  position_t: { type: Type.NUMBER },
-                  width_px: { type: Type.NUMBER },
-                  confidence: { type: Type.NUMBER },
-                  provenance: { type: Type.STRING },
-                },
-                required: ['id', 'kind', 'wall_id', 'position_t', 'width_px', 'confidence'],
+                required: ['x1', 'y1', 'x2', 'y2', 'is_exterior'],
               },
             },
             rooms: {
@@ -133,24 +124,27 @@ CRITICAL REQUIREMENTS:
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  id: { type: Type.STRING },
                   name: { type: Type.STRING },
                   category: { type: Type.STRING },
-                  points: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        x: { type: Type.NUMBER },
-                        y: { type: Type.NUMBER },
-                      },
-                      required: ['x', 'y'],
-                    },
-                  },
-                  confidence: { type: Type.NUMBER },
-                  provenance: { type: Type.STRING },
+                  xmin: { type: Type.NUMBER },
+                  ymin: { type: Type.NUMBER },
+                  xmax: { type: Type.NUMBER },
+                  ymax: { type: Type.NUMBER },
                 },
-                required: ['id', 'name', 'category', 'points', 'confidence'],
+                required: ['name', 'category', 'xmin', 'ymin', 'xmax', 'ymax'],
+              },
+            },
+            openings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  kind: { type: Type.STRING },
+                  cx: { type: Type.NUMBER },
+                  cy: { type: Type.NUMBER },
+                  width_norm: { type: Type.NUMBER },
+                },
+                required: ['kind', 'cx', 'cy', 'width_norm'],
               },
             },
             furniture: {
@@ -158,33 +152,19 @@ CRITICAL REQUIREMENTS:
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  id: { type: Type.STRING },
-                  room_id: { type: Type.STRING },
                   kind: { type: Type.STRING },
                   label: { type: Type.STRING },
-                  centerX: { type: Type.NUMBER },
-                  centerY: { type: Type.NUMBER },
-                  width_px: { type: Type.NUMBER },
-                  depth_px: { type: Type.NUMBER },
+                  xmin: { type: Type.NUMBER },
+                  ymin: { type: Type.NUMBER },
+                  xmax: { type: Type.NUMBER },
+                  ymax: { type: Type.NUMBER },
                   rotation_deg: { type: Type.NUMBER },
-                  provenance: { type: Type.STRING },
                 },
-                required: ['id', 'room_id', 'kind', 'label', 'centerX', 'centerY', 'width_px', 'depth_px', 'provenance'],
+                required: ['kind', 'label', 'xmin', 'ymin', 'xmax', 'ymax'],
               },
-            },
-            scale: {
-              type: Type.OBJECT,
-              properties: {
-                method: { type: Type.STRING },
-                meters_per_pixel: { type: Type.NUMBER },
-                confidence: { type: Type.NUMBER },
-                reference_label: { type: Type.STRING },
-                detected_dimension_text: { type: Type.STRING },
-              },
-              required: ['method', 'meters_per_pixel', 'confidence', 'reference_label'],
             },
           },
-          required: ['walls', 'openings', 'rooms', 'scale'],
+          required: ['walls', 'rooms', 'openings', 'furniture'],
         },
       },
     });
@@ -202,6 +182,7 @@ CRITICAL REQUIREMENTS:
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error('Gemini Vision analysis error:', message);
     res.status(200).json({ fallbackToMock: true, reason: message });
   }
 });
